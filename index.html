@@ -1,0 +1,488 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Control de Brazo Robótico 3D | NEMA 17 Stepper Control</title>
+    <link rel="stylesheet" href="css/styles.css">
+    <link href="https://fonts.googleapis.com/css2?family=Roboto:wght@300;400;500;700&family=Roboto+Mono:wght@400;500&display=swap" rel="stylesheet">
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
+</head>
+<body>
+    <!-- Loading Screen -->
+    <div id="loading-screen">
+        <div class="loader-container">
+            <div class="robot-loader">
+                <div class="arm-segment seg1"></div>
+                <div class="arm-segment seg2"></div>
+                <div class="arm-segment seg3"></div>
+            </div>
+            <div class="loading-text">Cargando Modelo 3D...</div>
+            <div class="progress-bar">
+                <div class="progress-fill"></div>
+            </div>
+        </div>
+    </div>
+
+    <!-- Main Application -->
+    <div id="app">
+        <!-- Header -->
+        <header class="app-header">
+            <div class="logo">
+                <i class="fas fa-robot"></i>
+                <span>RoboArm <span class="highlight">3D</span></span>
+            </div>
+            <nav class="header-nav">
+                <button class="nav-btn active" data-view="control">
+                    <i class="fas fa-sliders-h"></i> Control
+                </button>
+                <button class="nav-btn" data-view="kinematics">
+                    <i class="fas fa-calculator"></i> Cinemática
+                </button>
+                <button class="nav-btn" data-view="settings">
+                    <i class="fas fa-cog"></i> Configuración
+                </button>
+            </nav>
+            <div class="header-actions">
+                <button id="btn-reset" class="action-btn" title="Resetear posición">
+                    <i class="fas fa-undo"></i>
+                </button>
+                <button id="btn-home" class="action-btn" title="Posición Home">
+                    <i class="fas fa-home"></i>
+                </button>
+                <button id="btn-fullscreen" class="action-btn" title="Pantalla completa">
+                    <i class="fas fa-expand"></i>
+                </button>
+            </div>
+        </header>
+
+        <!-- Main Content -->
+        <main class="app-main">
+            <!-- 3D Viewport -->
+            <div id="viewport-container">
+                <canvas id="robot-canvas"></canvas>
+
+                <!-- Viewport Controls -->
+                <div class="viewport-controls">
+                    <button id="btn-zoom-in" class="vp-btn" title="Zoom In">
+                        <i class="fas fa-plus"></i>
+                    </button>
+                    <button id="btn-zoom-out" class="vp-btn" title="Zoom Out">
+                        <i class="fas fa-minus"></i>
+                    </button>
+                    <button id="btn-view-front" class="vp-btn" title="Vista Frontal">
+                        <i class="fas fa-square"></i>
+                    </button>
+                    <button id="btn-view-top" class="vp-btn" title="Vista Superior">
+                        <i class="fas fa-arrow-down"></i>
+                    </button>
+                    <button id="btn-view-iso" class="vp-btn" title="Vista Isométrica">
+                        <i class="fas fa-cube"></i>
+                    </button>
+                </div>
+
+                <!-- Position Display -->
+                <div class="position-display">
+                    <div class="pos-item">
+                        <span class="pos-label">X:</span>
+                        <span id="pos-x" class="pos-value">0.00</span>
+                        <span class="pos-unit">mm</span>
+                    </div>
+                    <div class="pos-item">
+                        <span class="pos-label">Y:</span>
+                        <span id="pos-y" class="pos-value">0.00</span>
+                        <span class="pos-unit">mm</span>
+                    </div>
+                    <div class="pos-item">
+                        <span class="pos-label">Z:</span>
+                        <span id="pos-z" class="pos-value">0.00</span>
+                        <span class="pos-unit">mm</span>
+                    </div>
+                </div>
+
+                <!-- Coordinate System Indicator -->
+                <div id="axes-helper"></div>
+            </div>
+
+            <!-- Control Panel -->
+            <aside class="control-panel">
+                <!-- Joint Controls Section -->
+                <section class="panel-section" id="section-control">
+                    <div class="section-header">
+                        <h2><i class="fas fa-cogs"></i> Control de Articulaciones</h2>
+                        <span class="section-badge">3 DOF</span>
+                    </div>
+
+                    <!-- Joint 1 - Base -->
+                    <div class="joint-control" data-joint="0">
+                        <div class="joint-header">
+                            <div class="joint-info">
+                                <span class="joint-icon"><i class="fas fa-sync-alt"></i></span>
+                                <div class="joint-details">
+                                    <h3>Base (θ₁)</h3>
+                                    <span class="motor-label">NEMA 17 - Motor 1</span>
+                                </div>
+                            </div>
+                            <div class="joint-value">
+                                <input type="number" id="joint1-input" class="angle-input" value="0" min="-180" max="180" step="1">
+                                <span class="angle-unit">°</span>
+                            </div>
+                        </div>
+                        <div class="slider-container">
+                            <input type="range" id="joint1-slider" class="joint-slider" min="-180" max="180" value="0" step="0.1">
+                            <div class="slider-track">
+                                <div class="slider-fill" style="width: 50%;"></div>
+                            </div>
+                            <div class="slider-labels">
+                                <span>-180°</span>
+                                <span>0°</span>
+                                <span>180°</span>
+                            </div>
+                        </div>
+                        <div class="quick-buttons">
+                            <button class="quick-btn" data-angle="-90">-90°</button>
+                            <button class="quick-btn" data-angle="-45">-45°</button>
+                            <button class="quick-btn" data-angle="0">0°</button>
+                            <button class="quick-btn" data-angle="45">45°</button>
+                            <button class="quick-btn" data-angle="90">90°</button>
+                        </div>
+                    </div>
+
+                    <!-- Joint 2 - Shoulder -->
+                    <div class="joint-control" data-joint="1">
+                        <div class="joint-header">
+                            <div class="joint-info">
+                                <span class="joint-icon shoulder"><i class="fas fa-arrows-alt-v"></i></span>
+                                <div class="joint-details">
+                                    <h3>Hombro (θ₂)</h3>
+                                    <span class="motor-label">NEMA 17 - Motor 2</span>
+                                </div>
+                            </div>
+                            <div class="joint-value">
+                                <input type="number" id="joint2-input" class="angle-input" value="0" min="-90" max="90" step="1">
+                                <span class="angle-unit">°</span>
+                            </div>
+                        </div>
+                        <div class="slider-container">
+                            <input type="range" id="joint2-slider" class="joint-slider" min="-90" max="90" value="0" step="0.1">
+                            <div class="slider-track">
+                                <div class="slider-fill shoulder" style="width: 50%;"></div>
+                            </div>
+                            <div class="slider-labels">
+                                <span>-90°</span>
+                                <span>0°</span>
+                                <span>90°</span>
+                            </div>
+                        </div>
+                        <div class="quick-buttons">
+                            <button class="quick-btn" data-angle="-45">-45°</button>
+                            <button class="quick-btn" data-angle="-30">-30°</button>
+                            <button class="quick-btn" data-angle="0">0°</button>
+                            <button class="quick-btn" data-angle="30">30°</button>
+                            <button class="quick-btn" data-angle="45">45°</button>
+                        </div>
+                    </div>
+
+                    <!-- Joint 3 - Elbow -->
+                    <div class="joint-control" data-joint="2">
+                        <div class="joint-header">
+                            <div class="joint-info">
+                                <span class="joint-icon elbow"><i class="fas fa-angle-double-up"></i></span>
+                                <div class="joint-details">
+                                    <h3>Codo (θ₃)</h3>
+                                    <span class="motor-label">NEMA 17 - Motor 3</span>
+                                </div>
+                            </div>
+                            <div class="joint-value">
+                                <input type="number" id="joint3-input" class="angle-input" value="0" min="-135" max="135" step="1">
+                                <span class="angle-unit">°</span>
+                            </div>
+                        </div>
+                        <div class="slider-container">
+                            <input type="range" id="joint3-slider" class="joint-slider" min="-135" max="135" value="0" step="0.1">
+                            <div class="slider-track">
+                                <div class="slider-fill elbow" style="width: 50%;"></div>
+                            </div>
+                            <div class="slider-labels">
+                                <span>-135°</span>
+                                <span>0°</span>
+                                <span>135°</span>
+                            </div>
+                        </div>
+                        <div class="quick-buttons">
+                            <button class="quick-btn" data-angle="-90">-90°</button>
+                            <button class="quick-btn" data-angle="-45">-45°</button>
+                            <button class="quick-btn" data-angle="0">0°</button>
+                            <button class="quick-btn" data-angle="45">45°</button>
+                            <button class="quick-btn" data-angle="90">90°</button>
+                        </div>
+                    </div>
+                </section>
+
+                <!-- Kinematics Section -->
+                <section class="panel-section hidden" id="section-kinematics">
+                    <div class="section-header">
+                        <h2><i class="fas fa-calculator"></i> Cinemática</h2>
+                    </div>
+
+                    <!-- Forward Kinematics -->
+                    <div class="kinematics-block">
+                        <h3><i class="fas fa-arrow-right"></i> Cinemática Directa</h3>
+                        <p class="kin-description">Calcular posición del efector final a partir de los ángulos</p>
+                        <div class="kin-result">
+                            <div class="result-row">
+                                <span class="result-label">Posición X:</span>
+                                <span id="fk-x" class="result-value">0.00 mm</span>
+                            </div>
+                            <div class="result-row">
+                                <span class="result-label">Posición Y:</span>
+                                <span id="fk-y" class="result-value">0.00 mm</span>
+                            </div>
+                            <div class="result-row">
+                                <span class="result-label">Posición Z:</span>
+                                <span id="fk-z" class="result-value">0.00 mm</span>
+                            </div>
+                        </div>
+                    </div>
+
+                    <!-- Inverse Kinematics -->
+                    <div class="kinematics-block">
+                        <h3><i class="fas fa-arrow-left"></i> Cinemática Inversa</h3>
+                        <p class="kin-description">Calcular ángulos para alcanzar una posición</p>
+                        <div class="ik-inputs">
+                            <div class="ik-input-group">
+                                <label>X (mm)</label>
+                                <input type="number" id="ik-target-x" value="100" step="1">
+                            </div>
+                            <div class="ik-input-group">
+                                <label>Y (mm)</label>
+                                <input type="number" id="ik-target-y" value="100" step="1">
+                            </div>
+                            <div class="ik-input-group">
+                                <label>Z (mm)</label>
+                                <input type="number" id="ik-target-z" value="50" step="1">
+                            </div>
+                        </div>
+                        <button id="btn-calc-ik" class="primary-btn">
+                            <i class="fas fa-calculator"></i> Calcular IK
+                        </button>
+                        <div class="ik-result">
+                            <div class="result-row">
+                                <span class="result-label">θ₁ (Base):</span>
+                                <span id="ik-theta1" class="result-value">--°</span>
+                            </div>
+                            <div class="result-row">
+                                <span class="result-label">θ₂ (Hombro):</span>
+                                <span id="ik-theta2" class="result-value">--°</span>
+                            </div>
+                            <div class="result-row">
+                                <span class="result-label">θ₃ (Codo):</span>
+                                <span id="ik-theta3" class="result-value">--°</span>
+                            </div>
+                            <div id="ik-status" class="ik-status"></div>
+                        </div>
+                        <button id="btn-apply-ik" class="secondary-btn" disabled>
+                            <i class="fas fa-check"></i> Aplicar Posición
+                        </button>
+                    </div>
+
+                    <!-- DH Parameters -->
+                    <div class="kinematics-block">
+                        <h3><i class="fas fa-table"></i> Parámetros DH</h3>
+                        <table class="dh-table">
+                            <thead>
+                                <tr>
+                                    <th>Link</th>
+                                    <th>a (mm)</th>
+                                    <th>α (°)</th>
+                                    <th>d (mm)</th>
+                                    <th>θ (°)</th>
+                                </tr>
+                            </thead>
+                            <tbody>
+                                <tr>
+                                    <td>1</td>
+                                    <td>0</td>
+                                    <td>90</td>
+                                    <td id="dh-d1">50</td>
+                                    <td id="dh-theta1">θ₁</td>
+                                </tr>
+                                <tr>
+                                    <td>2</td>
+                                    <td id="dh-a2">100</td>
+                                    <td>0</td>
+                                    <td>0</td>
+                                    <td id="dh-theta2">θ₂</td>
+                                </tr>
+                                <tr>
+                                    <td>3</td>
+                                    <td id="dh-a3">80</td>
+                                    <td>0</td>
+                                    <td>0</td>
+                                    <td id="dh-theta3">θ₃</td>
+                                </tr>
+                            </tbody>
+                        </table>
+                    </div>
+                </section>
+
+                <!-- Settings Section -->
+                <section class="panel-section hidden" id="section-settings">
+                    <div class="section-header">
+                        <h2><i class="fas fa-cog"></i> Configuración</h2>
+                    </div>
+
+                    <!-- Robot Parameters -->
+                    <div class="settings-block">
+                        <h3><i class="fas fa-ruler"></i> Parámetros del Robot</h3>
+                        <div class="setting-item">
+                            <label>Longitud L1 (Base a Hombro)</label>
+                            <div class="setting-input">
+                                <input type="number" id="param-l1" value="50" min="10" max="200" step="1">
+                                <span class="unit">mm</span>
+                            </div>
+                        </div>
+                        <div class="setting-item">
+                            <label>Longitud L2 (Hombro a Codo)</label>
+                            <div class="setting-input">
+                                <input type="number" id="param-l2" value="100" min="10" max="300" step="1">
+                                <span class="unit">mm</span>
+                            </div>
+                        </div>
+                        <div class="setting-item">
+                            <label>Longitud L3 (Codo a Efector)</label>
+                            <div class="setting-input">
+                                <input type="number" id="param-l3" value="80" min="10" max="200" step="1">
+                                <span class="unit">mm</span>
+                            </div>
+                        </div>
+                        <button id="btn-apply-params" class="primary-btn">
+                            <i class="fas fa-save"></i> Aplicar Cambios
+                        </button>
+                    </div>
+
+                    <!-- Motor Settings -->
+                    <div class="settings-block">
+                        <h3><i class="fas fa-bolt"></i> Configuración de Motores</h3>
+                        <div class="setting-item">
+                            <label>Pasos por revolución</label>
+                            <div class="setting-input">
+                                <input type="number" id="motor-steps" value="200" min="100" max="400" step="1">
+                                <span class="unit">pasos</span>
+                            </div>
+                        </div>
+                        <div class="setting-item">
+                            <label>Microstepping</label>
+                            <select id="motor-microstepping">
+                                <option value="1">Full Step (1)</option>
+                                <option value="2">Half Step (1/2)</option>
+                                <option value="4">1/4 Step</option>
+                                <option value="8">1/8 Step</option>
+                                <option value="16" selected>1/16 Step</option>
+                                <option value="32">1/32 Step</option>
+                            </select>
+                        </div>
+                        <div class="setting-item">
+                            <label>Velocidad de animación</label>
+                            <input type="range" id="anim-speed" min="0.1" max="2" value="1" step="0.1">
+                            <span id="anim-speed-value">1.0x</span>
+                        </div>
+                    </div>
+
+                    <!-- Visual Settings -->
+                    <div class="settings-block">
+                        <h3><i class="fas fa-palette"></i> Visualización</h3>
+                        <div class="setting-item toggle">
+                            <label>Mostrar ejes de referencia</label>
+                            <label class="switch">
+                                <input type="checkbox" id="show-axes" checked>
+                                <span class="switch-slider"></span>
+                            </label>
+                        </div>
+                        <div class="setting-item toggle">
+                            <label>Mostrar grilla</label>
+                            <label class="switch">
+                                <input type="checkbox" id="show-grid" checked>
+                                <span class="switch-slider"></span>
+                            </label>
+                        </div>
+                        <div class="setting-item toggle">
+                            <label>Mostrar trayectoria</label>
+                            <label class="switch">
+                                <input type="checkbox" id="show-trajectory">
+                                <span class="switch-slider"></span>
+                            </label>
+                        </div>
+                        <div class="setting-item toggle">
+                            <label>Modo oscuro</label>
+                            <label class="switch">
+                                <input type="checkbox" id="dark-mode" checked>
+                                <span class="switch-slider"></span>
+                            </label>
+                        </div>
+                    </div>
+                </section>
+
+                <!-- Presets Section -->
+                <section class="panel-section-mini">
+                    <div class="section-header mini">
+                        <h2><i class="fas fa-bookmark"></i> Posiciones Guardadas</h2>
+                    </div>
+                    <div class="presets-grid">
+                        <button class="preset-btn" data-preset="home" title="Posición inicial">
+                            <i class="fas fa-home"></i>
+                            <span>Home</span>
+                        </button>
+                        <button class="preset-btn" data-preset="pick" title="Posición de agarre">
+                            <i class="fas fa-hand-rock"></i>
+                            <span>Pick</span>
+                        </button>
+                        <button class="preset-btn" data-preset="place" title="Posición de colocación">
+                            <i class="fas fa-hand-paper"></i>
+                            <span>Place</span>
+                        </button>
+                        <button class="preset-btn" data-preset="custom" title="Guardar posición actual">
+                            <i class="fas fa-plus"></i>
+                            <span>Guardar</span>
+                        </button>
+                    </div>
+                </section>
+            </aside>
+        </main>
+
+        <!-- Status Bar -->
+        <footer class="status-bar">
+            <div class="status-left">
+                <span class="status-item">
+                    <i class="fas fa-microchip"></i>
+                    <span id="status-motors">3 Motores NEMA 17</span>
+                </span>
+                <span class="status-item">
+                    <i class="fas fa-cube"></i>
+                    <span id="status-model">Modelo cargado</span>
+                </span>
+            </div>
+            <div class="status-center">
+                <span id="status-message"></span>
+            </div>
+            <div class="status-right">
+                <span class="status-item">
+                    <i class="fas fa-tachometer-alt"></i>
+                    <span id="fps-counter">60 FPS</span>
+                </span>
+            </div>
+        </footer>
+    </div>
+
+    <!-- Toast Notifications -->
+    <div id="toast-container"></div>
+
+    <!-- Scripts -->
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/three@0.128.0/examples/js/controls/OrbitControls.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/three@0.128.0/examples/js/loaders/STLLoader.min.js"></script>
+    <script src="js/kinematics.js"></script>
+    <script src="js/ui.js"></script>
+    <script src="js/main.js"></script>
+</body>
+</html>
