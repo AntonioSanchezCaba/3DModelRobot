@@ -3,6 +3,15 @@
  * MAIN APPLICATION - 3D ROBOTIC ARM CONTROLLER
  * Three.js integration with kinematics and UI
  * =====================================================
+ *
+ * Coordinate System Mapping:
+ * - Kinematics: X=forward, Y=left, Z=up
+ * - Three.js:   X=right, Y=up, Z=forward
+ *
+ * For this application, we align them:
+ * - Kinematics X -> Three.js X
+ * - Kinematics Y -> Three.js Z
+ * - Kinematics Z -> Three.js Y
  */
 
 class RobotArmController {
@@ -16,15 +25,17 @@ class RobotArmController {
         // Robot components
         this.robotGroup = null;
         this.base = null;
-        this.link1 = null;
-        this.link2 = null;
-        this.link3 = null;
-        this.endEffector = null;
 
         // Joint pivots for rotation
-        this.joint1Pivot = null;
-        this.joint2Pivot = null;
-        this.joint3Pivot = null;
+        this.joint1Pivot = null;  // Base rotation (around Y/vertical)
+        this.joint2Pivot = null;  // Shoulder rotation (pitch)
+        this.joint3Pivot = null;  // Elbow rotation (pitch)
+
+        // Link meshes
+        this.link1Mesh = null;    // Vertical tower
+        this.link2Mesh = null;    // Upper arm
+        this.link3Mesh = null;    // Forearm
+        this.endEffectorMesh = null;
 
         // Visual helpers
         this.axesHelper = null;
@@ -69,7 +80,7 @@ class RobotArmController {
         this.setupHelpers();
 
         // Create robot model
-        this.createSimplifiedRobot();
+        this.createRobotModel();
 
         // Try to load STL model
         await this.loadSTLModel();
@@ -98,6 +109,18 @@ class RobotArmController {
 
         // Update status
         this.updateStatus('Modelo cargado correctamente');
+
+        // Verify kinematics on startup
+        this.verifyInitialPosition();
+    }
+
+    /**
+     * Verify initial position matches kinematics
+     */
+    verifyInitialPosition() {
+        const fk = this.kinematics.forwardKinematics([0, 0, 0]);
+        console.log('Home position (θ1=0, θ2=0, θ3=0):', fk.position);
+        console.log('Expected: X=180, Y=0, Z=50');
     }
 
     /**
@@ -117,7 +140,7 @@ class RobotArmController {
         const aspect = container.clientWidth / container.clientHeight;
 
         this.camera = new THREE.PerspectiveCamera(45, aspect, 0.1, 2000);
-        this.camera.position.set(300, 200, 300);
+        this.camera.position.set(250, 200, 250);
         this.camera.lookAt(0, 50, 0);
     }
 
@@ -195,7 +218,7 @@ class RobotArmController {
         this.controls.minDistance = 100;
         this.controls.maxDistance = 800;
         this.controls.maxPolarAngle = Math.PI / 2 + 0.3;
-        this.controls.target.set(0, 50, 0);
+        this.controls.target.set(50, 50, 0);
         this.controls.update();
     }
 
@@ -203,7 +226,7 @@ class RobotArmController {
      * Setup visual helpers (grid, axes)
      */
     setupHelpers() {
-        // Grid
+        // Grid on XZ plane (Three.js default)
         this.gridHelper = new THREE.GridHelper(400, 40, 0x6366f1, 0x252542);
         this.gridHelper.material.opacity = 0.3;
         this.gridHelper.material.transparent = true;
@@ -224,25 +247,28 @@ class RobotArmController {
         ground.receiveShadow = true;
         this.scene.add(ground);
 
-        // Axes helper
+        // Axes helper (X=red, Y=green/up, Z=blue)
         this.axesHelper = new THREE.AxesHelper(100);
         this.scene.add(this.axesHelper);
-
-        // Create mini axes helper for corner display
-        this.createMiniAxes();
     }
 
     /**
-     * Create mini axes for corner display
+     * Create robot model that matches kinematics
+     *
+     * Robot structure:
+     * - Base platform at Y=0
+     * - Joint 1 pivot at Y=0 (rotates around Y axis = θ1)
+     * - Vertical tower up to Y=L1 (shoulder height)
+     * - Joint 2 pivot at Y=L1 (rotates around Z axis = θ2, pitch)
+     * - Upper arm extends along X when θ2=0
+     * - Joint 3 pivot at end of upper arm (rotates around Z = θ3)
+     * - Forearm extends along X when θ3=0
      */
-    createMiniAxes() {
-        // This will be rendered in a separate div if needed
-    }
+    createRobotModel() {
+        const L1 = this.kinematics.L1;  // 50mm - base height
+        const L2 = this.kinematics.L2;  // 100mm - upper arm
+        const L3 = this.kinematics.L3;  // 80mm - forearm
 
-    /**
-     * Create simplified robot model (fallback)
-     */
-    createSimplifiedRobot() {
         this.robotGroup = new THREE.Group();
 
         // Materials
@@ -260,13 +286,13 @@ class RobotArmController {
             emissiveIntensity: 0.1
         });
 
-        const link1Material = new THREE.MeshStandardMaterial({
+        const link2Material = new THREE.MeshStandardMaterial({
             color: 0x10b981,
             metalness: 0.6,
             roughness: 0.3
         });
 
-        const link2Material = new THREE.MeshStandardMaterial({
+        const link3Material = new THREE.MeshStandardMaterial({
             color: 0xf59e0b,
             metalness: 0.6,
             roughness: 0.3
@@ -280,105 +306,111 @@ class RobotArmController {
             emissiveIntensity: 0.2
         });
 
-        // Base platform
-        const baseGeometry = new THREE.CylinderGeometry(40, 45, 15, 32);
+        // ============================================
+        // BASE PLATFORM (fixed)
+        // ============================================
+        const baseGeometry = new THREE.CylinderGeometry(35, 40, 12, 32);
         this.base = new THREE.Mesh(baseGeometry, baseMaterial);
-        this.base.position.y = 7.5;
+        this.base.position.y = 6;
         this.base.castShadow = true;
         this.base.receiveShadow = true;
         this.robotGroup.add(this.base);
 
-        // Joint 1 pivot (base rotation)
+        // ============================================
+        // JOINT 1 - BASE ROTATION (θ1 around Y axis)
+        // ============================================
         this.joint1Pivot = new THREE.Group();
-        this.joint1Pivot.position.y = 15;
+        this.joint1Pivot.position.y = 12;  // On top of base
         this.robotGroup.add(this.joint1Pivot);
 
-        // Base motor housing
-        const motorHousing1 = new THREE.Mesh(
-            new THREE.CylinderGeometry(20, 20, this.kinematics.L1, 32),
+        // Vertical tower from base to shoulder (Link 1)
+        const towerGeometry = new THREE.CylinderGeometry(15, 18, L1, 32);
+        this.link1Mesh = new THREE.Mesh(towerGeometry, jointMaterial);
+        this.link1Mesh.position.y = L1 / 2;
+        this.link1Mesh.castShadow = true;
+        this.joint1Pivot.add(this.link1Mesh);
+
+        // Shoulder joint housing
+        const shoulderHousing = new THREE.Mesh(
+            new THREE.SphereGeometry(18, 32, 32),
             jointMaterial
         );
-        motorHousing1.position.y = this.kinematics.L1 / 2;
-        motorHousing1.castShadow = true;
-        this.joint1Pivot.add(motorHousing1);
+        shoulderHousing.position.y = L1;
+        shoulderHousing.castShadow = true;
+        this.joint1Pivot.add(shoulderHousing);
 
-        // Shoulder joint sphere
-        const shoulderJoint = new THREE.Mesh(
-            new THREE.SphereGeometry(15, 32, 32),
-            jointMaterial
-        );
-        shoulderJoint.position.y = this.kinematics.L1;
-        shoulderJoint.castShadow = true;
-        this.joint1Pivot.add(shoulderJoint);
-
-        // Joint 2 pivot (shoulder)
+        // ============================================
+        // JOINT 2 - SHOULDER (θ2 pitch rotation)
+        // Position at Y = L1 (top of tower)
+        // Rotates around local Z axis (perpendicular to arm plane)
+        // When θ2=0: arm points along +X
+        // When θ2=90: arm points along +Y (up)
+        // ============================================
         this.joint2Pivot = new THREE.Group();
-        this.joint2Pivot.position.y = this.kinematics.L1;
+        this.joint2Pivot.position.y = L1;
         this.joint1Pivot.add(this.joint2Pivot);
 
-        // Upper arm (Link 2)
-        const link2Geometry = new THREE.BoxGeometry(12, this.kinematics.L2, 12);
-        this.link2 = new THREE.Mesh(link2Geometry, link1Material);
-        this.link2.position.y = this.kinematics.L2 / 2;
-        this.link2.castShadow = true;
-        this.joint2Pivot.add(this.link2);
+        // Upper arm (Link 2) - extends along local +X when θ2=0
+        const link2Geometry = new THREE.BoxGeometry(L2, 12, 12);
+        this.link2Mesh = new THREE.Mesh(link2Geometry, link2Material);
+        this.link2Mesh.position.x = L2 / 2;  // Center at half length along X
+        this.link2Mesh.castShadow = true;
+        this.joint2Pivot.add(this.link2Mesh);
 
         // Elbow joint sphere
         const elbowJoint = new THREE.Mesh(
-            new THREE.SphereGeometry(12, 32, 32),
+            new THREE.SphereGeometry(10, 32, 32),
             jointMaterial
         );
-        elbowJoint.position.y = this.kinematics.L2;
+        elbowJoint.position.x = L2;  // At end of upper arm
         elbowJoint.castShadow = true;
         this.joint2Pivot.add(elbowJoint);
 
-        // Joint 3 pivot (elbow)
+        // ============================================
+        // JOINT 3 - ELBOW (θ3 pitch rotation)
+        // Position at X = L2 (end of upper arm)
+        // Rotates around local Z axis
+        // When θ3=0: forearm continues along same direction as upper arm
+        // ============================================
         this.joint3Pivot = new THREE.Group();
-        this.joint3Pivot.position.y = this.kinematics.L2;
+        this.joint3Pivot.position.x = L2;
         this.joint2Pivot.add(this.joint3Pivot);
 
-        // Forearm (Link 3)
-        const link3Geometry = new THREE.BoxGeometry(10, this.kinematics.L3, 10);
-        this.link3 = new THREE.Mesh(link3Geometry, link2Material);
-        this.link3.position.y = this.kinematics.L3 / 2;
-        this.link3.castShadow = true;
-        this.joint3Pivot.add(this.link3);
+        // Forearm (Link 3) - extends along local +X when θ3=0
+        const link3Geometry = new THREE.BoxGeometry(L3, 10, 10);
+        this.link3Mesh = new THREE.Mesh(link3Geometry, link3Material);
+        this.link3Mesh.position.x = L3 / 2;
+        this.link3Mesh.castShadow = true;
+        this.joint3Pivot.add(this.link3Mesh);
 
         // End effector
         const endEffectorGeometry = new THREE.ConeGeometry(8, 20, 32);
-        this.endEffector = new THREE.Mesh(endEffectorGeometry, endEffectorMaterial);
-        this.endEffector.position.y = this.kinematics.L3 + 10;
-        this.endEffector.castShadow = true;
-        this.joint3Pivot.add(this.endEffector);
+        this.endEffectorMesh = new THREE.Mesh(endEffectorGeometry, endEffectorMaterial);
+        this.endEffectorMesh.position.x = L3 + 10;
+        this.endEffectorMesh.rotation.z = -Math.PI / 2;  // Point along X
+        this.endEffectorMesh.castShadow = true;
+        this.joint3Pivot.add(this.endEffectorMesh);
 
-        // Add NEMA 17 motor models
-        this.addMotorModels();
+        // Add coordinate markers at joints
+        this.addJointMarkers();
 
         this.scene.add(this.robotGroup);
     }
 
     /**
-     * Add NEMA 17 motor visual models
+     * Add small coordinate markers at joints for debugging
      */
-    addMotorModels() {
-        const motorGeometry = new THREE.BoxGeometry(42, 42, 48);
-        const motorMaterial = new THREE.MeshStandardMaterial({
-            color: 0x1a1a1a,
-            metalness: 0.9,
-            roughness: 0.3
-        });
+    addJointMarkers() {
+        // Small axes at each joint
+        const axesSize = 30;
 
-        // Motor 1 (Base) - inside base
-        // Motor representation is integrated in the base
-
-        // Add motor labels/indicators
-        const createMotorLabel = (text, position) => {
-            // In a full implementation, we'd add text sprites here
-        };
+        const shoulder = new THREE.AxesHelper(axesSize);
+        shoulder.position.y = this.kinematics.L1;
+        this.joint1Pivot.add(shoulder);
     }
 
     /**
-     * Load STL model
+     * Load STL model (reference overlay)
      */
     async loadSTLModel() {
         return new Promise((resolve) => {
@@ -387,7 +419,6 @@ class RobotArmController {
             loader.load(
                 'assembly.stl',
                 (geometry) => {
-                    // Center and scale the geometry
                     geometry.computeBoundingBox();
                     const bbox = geometry.boundingBox;
                     const center = new THREE.Vector3();
@@ -395,29 +426,26 @@ class RobotArmController {
 
                     geometry.translate(-center.x, -center.y, -center.z);
 
-                    // Calculate scale to fit nicely
                     const size = new THREE.Vector3();
                     bbox.getSize(size);
                     const maxDim = Math.max(size.x, size.y, size.z);
                     const scale = 150 / maxDim;
 
-                    // Create mesh
                     const material = new THREE.MeshStandardMaterial({
                         color: 0x6366f1,
                         metalness: 0.4,
                         roughness: 0.5,
                         transparent: true,
-                        opacity: 0.3,
+                        opacity: 0.2,
                         wireframe: false
                     });
 
                     const mesh = new THREE.Mesh(geometry, material);
                     mesh.scale.set(scale, scale, scale);
-                    mesh.position.y = 100;
+                    mesh.position.y = 80;
                     mesh.castShadow = true;
                     mesh.receiveShadow = true;
 
-                    // Add to scene as reference model (semi-transparent)
                     this.stlMesh = mesh;
                     this.scene.add(mesh);
 
@@ -426,7 +454,10 @@ class RobotArmController {
                 },
                 (xhr) => {
                     const progress = (xhr.loaded / xhr.total * 100);
-                    document.querySelector('.progress-fill').style.width = `${progress}%`;
+                    const progressFill = document.querySelector('.progress-fill');
+                    if (progressFill) {
+                        progressFill.style.width = `${progress}%`;
+                    }
                 },
                 (error) => {
                     console.warn('Could not load STL file, using simplified model');
@@ -484,19 +515,32 @@ class RobotArmController {
 
     /**
      * Set joint angle
+     *
+     * Joint mapping:
+     * - Joint 0 (θ1): Base rotation around Y axis (Three.js Y = Kinematics Z)
+     * - Joint 1 (θ2): Shoulder pitch around Z axis (local frame)
+     * - Joint 2 (θ3): Elbow pitch around Z axis (local frame)
+     *
+     * @param {number} jointIndex - 0, 1, or 2
+     * @param {number} angleDegrees - Angle in degrees
      */
     setJointAngle(jointIndex, angleDegrees) {
         this.currentAngles[jointIndex] = angleDegrees;
         const angleRad = angleDegrees * Math.PI / 180;
 
         switch (jointIndex) {
-            case 0: // Base rotation (Y-axis)
+            case 0:
+                // θ1: Base rotation around Y axis
                 this.joint1Pivot.rotation.y = angleRad;
                 break;
-            case 1: // Shoulder (Z-axis in local space, appears as pitch)
+            case 1:
+                // θ2: Shoulder pitch - rotation around Z axis in local frame
+                // Positive θ2 = arm goes UP
                 this.joint2Pivot.rotation.z = angleRad;
                 break;
-            case 2: // Elbow (Z-axis in local space)
+            case 2:
+                // θ3: Elbow pitch - rotation around Z axis in local frame
+                // Positive θ3 = forearm folds UP relative to upper arm
                 this.joint3Pivot.rotation.z = angleRad;
                 break;
         }
@@ -515,22 +559,27 @@ class RobotArmController {
     }
 
     /**
-     * Add point to trajectory
+     * Add point to trajectory line
      */
     addTrajectoryPoint() {
         const fk = this.kinematics.forwardKinematics(this.currentAngles);
-        this.trajectoryPoints.push(new THREE.Vector3(
-            fk.position.x,
-            fk.position.z + 15, // Offset to match robot position
-            fk.position.y
-        ));
+
+        // Convert kinematics coords to Three.js coords
+        // Kinematics: X=forward, Y=left, Z=up
+        // Three.js: X=right, Y=up, Z=forward
+        // Our mapping: kinX->threeX, kinY->threeZ, kinZ->threeY
+        const threeX = fk.position.x;
+        const threeY = fk.position.z + 12;  // Add base height offset
+        const threeZ = fk.position.y;
+
+        this.trajectoryPoints.push(new THREE.Vector3(threeX, threeY, threeZ));
 
         // Limit points
         if (this.trajectoryPoints.length > 500) {
             this.trajectoryPoints.shift();
         }
 
-        // Update line
+        // Update line geometry
         const positions = new Float32Array(this.trajectoryPoints.length * 3);
         this.trajectoryPoints.forEach((p, i) => {
             positions[i * 3] = p.x;
@@ -546,10 +595,15 @@ class RobotArmController {
     }
 
     /**
-     * Show target marker
+     * Show target marker at position (kinematics coordinates)
      */
     showTargetMarker(x, y, z) {
-        this.targetMarker.position.set(x, z + 15, y);
+        // Convert kinematics coords to Three.js coords
+        const threeX = x;
+        const threeY = z + 12;  // Base height offset
+        const threeZ = y;
+
+        this.targetMarker.position.set(threeX, threeY, threeZ);
         this.targetMarker.visible = true;
     }
 
@@ -582,17 +636,19 @@ class RobotArmController {
 
         switch (viewName) {
             case 'front':
-                endPos = new THREE.Vector3(0, 100, 350);
-                endTarget = new THREE.Vector3(0, 80, 0);
+                // View from +Z looking at robot
+                endPos = new THREE.Vector3(100, 80, 300);
+                endTarget = new THREE.Vector3(80, 60, 0);
                 break;
             case 'top':
-                endPos = new THREE.Vector3(0, 400, 0);
-                endTarget = new THREE.Vector3(0, 0, 0);
+                // View from above
+                endPos = new THREE.Vector3(100, 350, 0);
+                endTarget = new THREE.Vector3(80, 0, 0);
                 break;
             case 'isometric':
             default:
-                endPos = new THREE.Vector3(300, 200, 300);
-                endTarget = new THREE.Vector3(0, 50, 0);
+                endPos = new THREE.Vector3(250, 200, 250);
+                endTarget = new THREE.Vector3(50, 50, 0);
                 break;
         }
 
@@ -639,8 +695,17 @@ class RobotArmController {
      * Update robot geometry based on new parameters
      */
     updateRobotGeometry() {
-        // Update link lengths in the simplified model
-        // This would rebuild the robot with new dimensions
+        // Rebuild robot with new dimensions
+        if (this.robotGroup) {
+            this.scene.remove(this.robotGroup);
+        }
+        this.createRobotModel();
+
+        // Reapply current angles
+        this.setJointAngle(0, this.currentAngles[0]);
+        this.setJointAngle(1, this.currentAngles[1]);
+        this.setJointAngle(2, this.currentAngles[2]);
+
         this.updateStatus('Geometría actualizada');
     }
 
@@ -648,7 +713,10 @@ class RobotArmController {
      * Update status message
      */
     updateStatus(message) {
-        document.getElementById('status-message').textContent = message;
+        const statusEl = document.getElementById('status-message');
+        if (statusEl) {
+            statusEl.textContent = message;
+        }
     }
 
     /**
@@ -676,16 +744,16 @@ class RobotArmController {
         this.controls.update();
 
         // Animate target marker
-        if (this.targetMarker.visible) {
+        if (this.targetMarker && this.targetMarker.visible) {
             this.targetMarker.children[0].rotation.z += delta * 2;
             const scale = 1 + Math.sin(Date.now() * 0.005) * 0.1;
             this.targetMarker.scale.set(scale, scale, scale);
         }
 
         // Animate end effector glow
-        if (this.endEffector) {
+        if (this.endEffectorMesh) {
             const intensity = 0.2 + Math.sin(Date.now() * 0.003) * 0.1;
-            this.endEffector.material.emissiveIntensity = intensity;
+            this.endEffectorMesh.material.emissiveIntensity = intensity;
         }
 
         // Render
