@@ -61,8 +61,8 @@ class RobotArmController {
         this.dragHandle = null;
         this.dragPlane = null;
         this.raycaster = null;
-        this.mouse = new THREE.Vector2();
-        this.intersection = new THREE.Vector3();
+        this.mouse = null;
+        this.intersection = null;
 
         // Initialize
         this.init();
@@ -528,8 +528,10 @@ class RobotArmController {
      * Setup interactive drag controls for end effector
      */
     setupDragControls() {
-        // Create raycaster for mouse picking
+        // Initialize Three.js objects for raycasting
         this.raycaster = new THREE.Raycaster();
+        this.mouse = new THREE.Vector2();
+        this.intersection = new THREE.Vector3();
 
         // Create draggable handle at end effector
         this.createDragHandle();
