@@ -558,31 +558,41 @@ class RobotArmController {
      * Create draggable handle sphere at end effector
      */
     createDragHandle() {
-        const geometry = new THREE.SphereGeometry(12, 32, 32);
+        const geometry = new THREE.SphereGeometry(15, 32, 32);  // Slightly larger for easier clicking
+        geometry.computeBoundingSphere();  // Ensure bounding sphere is computed for raycasting
+
         const material = new THREE.MeshBasicMaterial({
             color: 0x00ff88,
             transparent: true,
-            opacity: 0.6,
-            depthTest: true
+            opacity: 0.7,
+            depthTest: false  // Render on top of everything
         });
 
         this.dragHandle = new THREE.Mesh(geometry, material);
         this.dragHandle.name = 'dragHandle';
+        this.dragHandle.renderOrder = 999;  // Render last (on top)
 
         // Add outer ring for better visibility
-        const ringGeometry = new THREE.TorusGeometry(15, 2, 16, 32);
+        const ringGeometry = new THREE.TorusGeometry(20, 3, 16, 32);
+        ringGeometry.computeBoundingSphere();
         const ringMaterial = new THREE.MeshBasicMaterial({
             color: 0x00ff88,
             transparent: true,
-            opacity: 0.8
+            opacity: 0.9,
+            depthTest: false
         });
         const ring = new THREE.Mesh(ringGeometry, ringMaterial);
+        ring.renderOrder = 999;
         this.dragHandle.add(ring);
 
         // Position at end effector
         this.updateDragHandlePosition();
 
         this.scene.add(this.dragHandle);
+
+        // Debug: Confirm drag handle was created and added
+        console.log('Drag handle created at:', this.dragHandle.position);
+        console.log('Drag handle geometry bounding sphere:', this.dragHandle.geometry.boundingSphere);
     }
 
     /**
@@ -652,8 +662,17 @@ class RobotArmController {
         this.getMouseCoords(event);
         this.raycaster.setFromCamera(this.mouse, this.camera);
 
+        // Debug: Log drag handle position and mouse coords
+        console.log('Mouse coords:', this.mouse.x.toFixed(3), this.mouse.y.toFixed(3));
+        console.log('Drag handle position:', this.dragHandle.position);
+
         // Check if clicking on drag handle
         const intersects = this.raycaster.intersectObject(this.dragHandle, true);
+        console.log('Intersects found:', intersects.length);
+
+        // Also check what objects the ray hits in the whole scene
+        const allIntersects = this.raycaster.intersectObjects(this.scene.children, true);
+        console.log('All scene intersects:', allIntersects.map(i => i.object.name || i.object.type));
 
         if (intersects.length > 0) {
             this.isDragging = true;
