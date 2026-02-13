@@ -586,16 +586,20 @@ class RobotArmController {
     }
 
     /**
-     * Update drag handle position based on current kinematics
+     * Update drag handle position based on forward kinematics
+     * This ensures the handle is always at the correct kinematic end effector position
      */
     updateDragHandlePosition() {
-        if (!this.dragHandle) return;
+        if (!this.dragHandle || !this.kinematics) return;
 
+        // Calculate end effector position from kinematics
         const fk = this.kinematics.forwardKinematics(this.currentAngles);
 
         // Convert kinematics coords to Three.js coords
+        // Kinematics: X=forward, Y=left, Z=up
+        // Three.js mapping: kinX->threeX, kinY->threeZ, kinZ->threeY
         const threeX = fk.position.x;
-        const threeY = fk.position.z + 12;  // Base height offset
+        const threeY = fk.position.z + 12;  // Add base height offset (base platform)
         const threeZ = fk.position.y;
 
         this.dragHandle.position.set(threeX, threeY, threeZ);
