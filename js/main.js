@@ -58,6 +58,7 @@ class RobotArmController {
 
         // Interactive dragging
         this.isDragging = false;
+        this.isHoveringHandle = false;
         this.dragHandle = null;
         this.dragPlane = null;
         this.raycaster = null;
@@ -746,10 +747,18 @@ class RobotArmController {
                 this.dragHandle.material.color.setHex(0x00ffaa);
                 this.dragHandle.material.opacity = 0.8;
                 document.body.style.cursor = 'grab';
+                // Disable orbit controls while hovering over handle to prevent interference
+                this.controls.enabled = false;
+                this.isHoveringHandle = true;
             } else {
                 this.dragHandle.material.color.setHex(0x00ff88);
-                this.dragHandle.material.opacity = 0.6;
+                this.dragHandle.material.opacity = 0.7;
                 document.body.style.cursor = 'default';
+                // Re-enable orbit controls when not hovering
+                if (this.isHoveringHandle && !this.isDragging) {
+                    this.controls.enabled = true;
+                    this.isHoveringHandle = false;
+                }
             }
         }
     }
@@ -760,13 +769,14 @@ class RobotArmController {
     onMouseUp(event) {
         if (this.isDragging) {
             this.isDragging = false;
+            this.isHoveringHandle = false;
 
             // Re-enable orbit controls
             this.controls.enabled = true;
 
             // Reset handle color
             this.dragHandle.material.color.setHex(0x00ff88);
-            this.dragHandle.material.opacity = 0.6;
+            this.dragHandle.material.opacity = 0.7;
 
             // Remove visual feedback
             document.body.classList.remove('dragging-active');
