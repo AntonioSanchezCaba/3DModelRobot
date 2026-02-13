@@ -655,6 +655,32 @@ class RobotArmController {
     }
 
     /**
+     * Check if click is near the drag handle (screen-space distance check)
+     */
+    isClickNearDragHandle(threshold = 30) {
+        // Project drag handle position to screen coordinates
+        const handleScreenPos = this.dragHandle.position.clone();
+        handleScreenPos.project(this.camera);
+
+        // Convert to pixel coordinates
+        const canvas = this.renderer.domElement;
+        const handleX = (handleScreenPos.x + 1) / 2 * canvas.clientWidth;
+        const handleY = (-handleScreenPos.y + 1) / 2 * canvas.clientHeight;
+
+        // Get mouse pixel coordinates
+        const mouseX = (this.mouse.x + 1) / 2 * canvas.clientWidth;
+        const mouseY = (-this.mouse.y + 1) / 2 * canvas.clientHeight;
+
+        // Calculate distance
+        const distance = Math.sqrt(
+            Math.pow(handleX - mouseX, 2) + Math.pow(handleY - mouseY, 2)
+        );
+
+        console.log('Screen distance to handle:', distance.toFixed(1), 'px (threshold:', threshold, ')');
+        return distance < threshold;
+    }
+
+    /**
      * Handle mouse down event
      */
     onMouseDown(event) {
@@ -667,15 +693,14 @@ class RobotArmController {
         console.log('Mouse coords:', this.mouse.x.toFixed(3), this.mouse.y.toFixed(3));
         console.log('Drag handle position:', this.dragHandle.position);
 
-        // Check if clicking on drag handle
+        // Check if clicking on drag handle using both methods
         const intersects = this.raycaster.intersectObject(this.dragHandle, true);
-        console.log('Intersects found:', intersects.length);
+        const isNearHandle = this.isClickNearDragHandle(40);  // 40px threshold
 
-        // Also check what objects the ray hits in the whole scene
-        const allIntersects = this.raycaster.intersectObjects(this.scene.children, true);
-        console.log('All scene intersects:', allIntersects.map(i => i.object.name || i.object.type));
+        console.log('Raycaster intersects:', intersects.length, '| Near handle:', isNearHandle);
 
-        if (intersects.length > 0) {
+        // Use either method to detect click on handle
+        if (intersects.length > 0 || isNearHandle) {
             this.isDragging = true;
 
             // Disable orbit controls while dragging
@@ -740,10 +765,11 @@ class RobotArmController {
                 }
             }
         } else {
-            // Hover detection
+            // Hover detection - use both raycaster and distance check
             const intersects = this.raycaster.intersectObject(this.dragHandle, true);
+            const isNearHandle = this.isClickNearDragHandle(50);  // Slightly larger for hover
 
-            if (intersects.length > 0) {
+            if (intersects.length > 0 || isNearHandle) {
                 this.dragHandle.material.color.setHex(0x00ffaa);
                 this.dragHandle.material.opacity = 0.8;
                 document.body.style.cursor = 'grab';
