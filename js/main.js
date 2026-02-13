@@ -56,6 +56,14 @@ class RobotArmController {
         // Settings
         this.showTrajectory = false;
 
+        // Interactive dragging
+        this.isDragging = false;
+        this.dragHandle = null;
+        this.dragPlane = null;
+        this.raycaster = null;
+        this.mouse = new THREE.Vector2();
+        this.intersection = new THREE.Vector3();
+
         // Initialize
         this.init();
     }
@@ -90,6 +98,9 @@ class RobotArmController {
 
         // Setup trajectory line
         this.setupTrajectoryLine();
+
+        // Setup interactive drag controls
+        this.setupDragControls();
 
         // Start animation loop
         this.clock = new THREE.Clock();
@@ -514,6 +525,348 @@ class RobotArmController {
     }
 
     /**
+     * Setup interactive drag controls for end effector
+     */
+    setupDragControls() {
+        // Create raycaster for mouse picking
+        this.raycaster = new THREE.Raycaster();
+
+        // Create draggable handle at end effector
+        this.createDragHandle();
+
+        // Create invisible drag plane
+        this.createDragPlane();
+
+        // Get canvas element
+        const canvas = this.renderer.domElement;
+
+        // Mouse/touch event listeners
+        canvas.addEventListener('mousedown', (e) => this.onMouseDown(e));
+        canvas.addEventListener('mousemove', (e) => this.onMouseMove(e));
+        canvas.addEventListener('mouseup', (e) => this.onMouseUp(e));
+        canvas.addEventListener('mouseleave', (e) => this.onMouseUp(e));
+
+        // Touch support
+        canvas.addEventListener('touchstart', (e) => this.onTouchStart(e), { passive: false });
+        canvas.addEventListener('touchmove', (e) => this.onTouchMove(e), { passive: false });
+        canvas.addEventListener('touchend', (e) => this.onTouchEnd(e));
+    }
+
+    /**
+     * Create draggable handle sphere at end effector
+     */
+    createDragHandle() {
+        const geometry = new THREE.SphereGeometry(12, 32, 32);
+        const material = new THREE.MeshBasicMaterial({
+            color: 0x00ff88,
+            transparent: true,
+            opacity: 0.6,
+            depthTest: true
+        });
+
+        this.dragHandle = new THREE.Mesh(geometry, material);
+        this.dragHandle.name = 'dragHandle';
+
+        // Add outer ring for better visibility
+        const ringGeometry = new THREE.TorusGeometry(15, 2, 16, 32);
+        const ringMaterial = new THREE.MeshBasicMaterial({
+            color: 0x00ff88,
+            transparent: true,
+            opacity: 0.8
+        });
+        const ring = new THREE.Mesh(ringGeometry, ringMaterial);
+        this.dragHandle.add(ring);
+
+        // Position at end effector
+        this.updateDragHandlePosition();
+
+        this.scene.add(this.dragHandle);
+    }
+
+    /**
+     * Update drag handle position based on current kinematics
+     */
+    updateDragHandlePosition() {
+        if (!this.dragHandle) return;
+
+        const fk = this.kinematics.forwardKinematics(this.currentAngles);
+
+        // Convert kinematics coords to Three.js coords
+        const threeX = fk.position.x;
+        const threeY = fk.position.z + 12;  // Base height offset
+        const threeZ = fk.position.y;
+
+        this.dragHandle.position.set(threeX, threeY, threeZ);
+    }
+
+    /**
+     * Create invisible plane for dragging
+     */
+    createDragPlane() {
+        const geometry = new THREE.PlaneGeometry(1000, 1000);
+        const material = new THREE.MeshBasicMaterial({
+            visible: false,
+            side: THREE.DoubleSide
+        });
+
+        this.dragPlane = new THREE.Mesh(geometry, material);
+        this.scene.add(this.dragPlane);
+    }
+
+    /**
+     * Update drag plane to face camera
+     */
+    updateDragPlane() {
+        if (!this.dragPlane || !this.dragHandle) return;
+
+        // Position plane at drag handle
+        this.dragPlane.position.copy(this.dragHandle.position);
+
+        // Make plane face the camera
+        this.dragPlane.lookAt(this.camera.position);
+    }
+
+    /**
+     * Get normalized mouse coordinates
+     */
+    getMouseCoords(event) {
+        const canvas = this.renderer.domElement;
+        const rect = canvas.getBoundingClientRect();
+
+        this.mouse.x = ((event.clientX - rect.left) / rect.width) * 2 - 1;
+        this.mouse.y = -((event.clientY - rect.top) / rect.height) * 2 + 1;
+    }
+
+    /**
+     * Handle mouse down event
+     */
+    onMouseDown(event) {
+        event.preventDefault();
+
+        this.getMouseCoords(event);
+        this.raycaster.setFromCamera(this.mouse, this.camera);
+
+        // Check if clicking on drag handle
+        const intersects = this.raycaster.intersectObject(this.dragHandle, true);
+
+        if (intersects.length > 0) {
+            this.isDragging = true;
+
+            // Disable orbit controls while dragging
+            this.controls.enabled = false;
+
+            // Update drag plane
+            this.updateDragPlane();
+
+            // Change handle color to indicate active dragging
+            this.dragHandle.material.color.setHex(0xffff00);
+            this.dragHandle.material.opacity = 0.9;
+
+            // Visual feedback
+            document.body.classList.add('dragging-active');
+            const indicator = document.getElementById('drag-indicator');
+            if (indicator) indicator.classList.add('active');
+
+            // Show status
+            this.updateStatus('Arrastrando efector final...');
+        }
+    }
+
+    /**
+     * Handle mouse move event
+     */
+    onMouseMove(event) {
+        event.preventDefault();
+
+        this.getMouseCoords(event);
+        this.raycaster.setFromCamera(this.mouse, this.camera);
+
+        if (this.isDragging) {
+            // Raycast against drag plane
+            const intersects = this.raycaster.intersectObject(this.dragPlane);
+
+            if (intersects.length > 0) {
+                const point = intersects[0].point;
+
+                // Convert Three.js coords to kinematics coords
+                const kinX = point.x;
+                const kinY = point.z;
+                const kinZ = point.y - 12;  // Remove base offset
+
+                // Calculate inverse kinematics
+                const ikResult = this.kinematics.inverseKinematics(kinX, kinY, kinZ);
+
+                if (ikResult.valid) {
+                    // Apply the calculated angles
+                    this.applyAnglesFromIK(ikResult.angles);
+
+                    // Update UI displays
+                    this.updateUIFromAngles(ikResult.angles);
+
+                    // Show current position in status
+                    this.updateStatus(`Pos: X=${kinX.toFixed(1)}, Y=${kinY.toFixed(1)}, Z=${kinZ.toFixed(1)}`);
+                } else {
+                    // Show error - position unreachable
+                    this.updateStatus(`Fuera de alcance: ${ikResult.error || 'Posición no válida'}`);
+
+                    // Move handle to nearest reachable point (visual feedback)
+                    this.dragHandle.material.color.setHex(0xff4444);
+                }
+            }
+        } else {
+            // Hover detection
+            const intersects = this.raycaster.intersectObject(this.dragHandle, true);
+
+            if (intersects.length > 0) {
+                this.dragHandle.material.color.setHex(0x00ffaa);
+                this.dragHandle.material.opacity = 0.8;
+                document.body.style.cursor = 'grab';
+            } else {
+                this.dragHandle.material.color.setHex(0x00ff88);
+                this.dragHandle.material.opacity = 0.6;
+                document.body.style.cursor = 'default';
+            }
+        }
+    }
+
+    /**
+     * Handle mouse up event
+     */
+    onMouseUp(event) {
+        if (this.isDragging) {
+            this.isDragging = false;
+
+            // Re-enable orbit controls
+            this.controls.enabled = true;
+
+            // Reset handle color
+            this.dragHandle.material.color.setHex(0x00ff88);
+            this.dragHandle.material.opacity = 0.6;
+
+            // Remove visual feedback
+            document.body.classList.remove('dragging-active');
+            document.body.style.cursor = 'default';
+            const indicator = document.getElementById('drag-indicator');
+            if (indicator) indicator.classList.remove('active');
+
+            // Show final position
+            const fk = this.kinematics.forwardKinematics(this.currentAngles);
+            this.updateStatus(`Posición: X=${fk.position.x.toFixed(1)}, Y=${fk.position.y.toFixed(1)}, Z=${fk.position.z.toFixed(1)} mm`);
+        }
+    }
+
+    /**
+     * Handle touch start event
+     */
+    onTouchStart(event) {
+        if (event.touches.length === 1) {
+            event.preventDefault();
+
+            const touch = event.touches[0];
+            this.getMouseCoords(touch);
+            this.raycaster.setFromCamera(this.mouse, this.camera);
+
+            const intersects = this.raycaster.intersectObject(this.dragHandle, true);
+
+            if (intersects.length > 0) {
+                this.isDragging = true;
+                this.controls.enabled = false;
+                this.updateDragPlane();
+                this.dragHandle.material.color.setHex(0xffff00);
+            }
+        }
+    }
+
+    /**
+     * Handle touch move event
+     */
+    onTouchMove(event) {
+        if (this.isDragging && event.touches.length === 1) {
+            event.preventDefault();
+
+            const touch = event.touches[0];
+            this.getMouseCoords(touch);
+            this.raycaster.setFromCamera(this.mouse, this.camera);
+
+            const intersects = this.raycaster.intersectObject(this.dragPlane);
+
+            if (intersects.length > 0) {
+                const point = intersects[0].point;
+
+                const kinX = point.x;
+                const kinY = point.z;
+                const kinZ = point.y - 12;
+
+                const ikResult = this.kinematics.inverseKinematics(kinX, kinY, kinZ);
+
+                if (ikResult.valid) {
+                    this.applyAnglesFromIK(ikResult.angles);
+                    this.updateUIFromAngles(ikResult.angles);
+                }
+            }
+        }
+    }
+
+    /**
+     * Handle touch end event
+     */
+    onTouchEnd(event) {
+        if (this.isDragging) {
+            this.isDragging = false;
+            this.controls.enabled = true;
+            this.dragHandle.material.color.setHex(0x00ff88);
+            this.dragHandle.material.opacity = 0.6;
+        }
+    }
+
+    /**
+     * Apply angles from IK calculation (without updating UI)
+     */
+    applyAnglesFromIK(angles) {
+        // Update internal state and 3D model
+        for (let i = 0; i < 3; i++) {
+            this.currentAngles[i] = angles[i];
+            const angleRad = angles[i] * Math.PI / 180;
+
+            switch (i) {
+                case 0:
+                    this.joint1Pivot.rotation.y = angleRad;
+                    break;
+                case 1:
+                    this.joint2Pivot.rotation.z = angleRad;
+                    break;
+                case 2:
+                    this.joint3Pivot.rotation.z = angleRad;
+                    break;
+            }
+        }
+
+        // Update drag handle position
+        this.updateDragHandlePosition();
+
+        // Update trajectory if enabled
+        if (this.showTrajectory) {
+            this.addTrajectoryPoint();
+        }
+    }
+
+    /**
+     * Update UI sliders and inputs from angles
+     */
+    updateUIFromAngles(angles) {
+        if (!this.ui) return;
+
+        // Update each joint control in the UI
+        for (let i = 0; i < 3; i++) {
+            this.ui.setJointAngle(i, angles[i]);
+        }
+
+        // Update kinematics display
+        this.ui.updateKinematicsDisplay();
+        this.ui.updatePositionDisplay();
+    }
+
+    /**
      * Set joint angle
      *
      * Joint mapping:
@@ -544,6 +897,9 @@ class RobotArmController {
                 this.joint3Pivot.rotation.z = angleRad;
                 break;
         }
+
+        // Update drag handle position
+        this.updateDragHandlePosition();
 
         // Update trajectory
         if (this.showTrajectory) {
