@@ -543,14 +543,16 @@ class RobotArmController {
         // Get canvas element
         const canvas = this.renderer.domElement;
 
-        // Mouse/touch event listeners
-        canvas.addEventListener('mousedown', (e) => this.onMouseDown(e));
-        canvas.addEventListener('mousemove', (e) => this.onMouseMove(e));
-        canvas.addEventListener('mouseup', (e) => this.onMouseUp(e));
-        canvas.addEventListener('mouseleave', (e) => this.onMouseUp(e));
+        // IMPORTANT: Use capture phase (3rd param = true) so our handlers fire
+        // BEFORE OrbitControls' handlers. This lets us intercept clicks on the
+        // drag handle and stop OrbitControls from processing them.
+        canvas.addEventListener('pointerdown', (e) => this.onPointerDown(e), true);
+        canvas.addEventListener('pointermove', (e) => this.onPointerMove(e), true);
+        canvas.addEventListener('pointerup', (e) => this.onPointerUp(e), true);
+        canvas.addEventListener('pointerleave', (e) => this.onPointerUp(e), true);
 
         // Touch support
-        canvas.addEventListener('touchstart', (e) => this.onTouchStart(e), { passive: false });
+        canvas.addEventListener('touchstart', (e) => this.onTouchStart(e), { passive: false, capture: true });
         canvas.addEventListener('touchmove', (e) => this.onTouchMove(e), { passive: false });
         canvas.addEventListener('touchend', (e) => this.onTouchEnd(e));
     }
@@ -681,32 +683,27 @@ class RobotArmController {
     }
 
     /**
-     * Handle mouse down event
+     * Handle pointer down event (capture phase - fires BEFORE OrbitControls)
      */
-    onMouseDown(event) {
-        event.preventDefault();
-
+    onPointerDown(event) {
         this.getMouseCoords(event);
         this.raycaster.setFromCamera(this.mouse, this.camera);
 
-        // Debug: Log drag handle position and mouse coords
-        console.log('Mouse coords:', this.mouse.x.toFixed(3), this.mouse.y.toFixed(3));
-        console.log('Drag handle position:', this.dragHandle.position);
-
         // Check if clicking on drag handle using both methods
         const intersects = this.raycaster.intersectObject(this.dragHandle, true);
-        const isNearHandle = this.isClickNearDragHandle(40);  // 40px threshold
+        const isNearHandle = this.isClickNearDragHandle(40);
 
-        console.log('Raycaster intersects:', intersects.length, '| Near handle:', isNearHandle);
+        console.log('[Drag] pointerdown - raycaster:', intersects.length, '| nearHandle:', isNearHandle);
 
-        // Use either method to detect click on handle
         if (intersects.length > 0 || isNearHandle) {
-            this.isDragging = true;
+            // CRITICAL: Stop the event from reaching OrbitControls
+            event.stopImmediatePropagation();
+            event.preventDefault();
 
-            // Disable orbit controls while dragging
+            this.isDragging = true;
             this.controls.enabled = false;
 
-            // Update drag plane
+            // Update drag plane to face camera at handle position
             this.updateDragPlane();
 
             // Change handle color to indicate active dragging
@@ -715,24 +712,26 @@ class RobotArmController {
 
             // Visual feedback
             document.body.classList.add('dragging-active');
+            document.body.style.cursor = 'grabbing';
             const indicator = document.getElementById('drag-indicator');
             if (indicator) indicator.classList.add('active');
 
-            // Show status
             this.updateStatus('Arrastrando efector final...');
         }
     }
 
     /**
-     * Handle mouse move event
+     * Handle pointer move event (capture phase)
      */
-    onMouseMove(event) {
-        event.preventDefault();
-
+    onPointerMove(event) {
         this.getMouseCoords(event);
         this.raycaster.setFromCamera(this.mouse, this.camera);
 
         if (this.isDragging) {
+            // CRITICAL: Stop OrbitControls from receiving move events while dragging
+            event.stopImmediatePropagation();
+            event.preventDefault();
+
             // Raycast against drag plane
             const intersects = this.raycaster.intersectObject(this.dragPlane);
 
@@ -754,35 +753,27 @@ class RobotArmController {
                     // Update UI displays
                     this.updateUIFromAngles(ikResult.angles);
 
-                    // Show current position in status
                     this.updateStatus(`Pos: X=${kinX.toFixed(1)}, Y=${kinY.toFixed(1)}, Z=${kinZ.toFixed(1)}`);
                 } else {
-                    // Show error - position unreachable
                     this.updateStatus(`Fuera de alcance: ${ikResult.error || 'Posición no válida'}`);
-
-                    // Move handle to nearest reachable point (visual feedback)
                     this.dragHandle.material.color.setHex(0xff4444);
                 }
             }
         } else {
-            // Hover detection - use both raycaster and distance check
+            // Hover detection - check if mouse is near the drag handle
             const intersects = this.raycaster.intersectObject(this.dragHandle, true);
-            const isNearHandle = this.isClickNearDragHandle(50);  // Slightly larger for hover
+            const isNearHandle = this.isClickNearDragHandle(50);
 
             if (intersects.length > 0 || isNearHandle) {
                 this.dragHandle.material.color.setHex(0x00ffaa);
                 this.dragHandle.material.opacity = 0.8;
                 document.body.style.cursor = 'grab';
-                // Disable orbit controls while hovering over handle to prevent interference
-                this.controls.enabled = false;
                 this.isHoveringHandle = true;
             } else {
                 this.dragHandle.material.color.setHex(0x00ff88);
                 this.dragHandle.material.opacity = 0.7;
-                document.body.style.cursor = 'default';
-                // Re-enable orbit controls when not hovering
-                if (this.isHoveringHandle && !this.isDragging) {
-                    this.controls.enabled = true;
+                if (this.isHoveringHandle) {
+                    document.body.style.cursor = 'default';
                     this.isHoveringHandle = false;
                 }
             }
@@ -790,10 +781,14 @@ class RobotArmController {
     }
 
     /**
-     * Handle mouse up event
+     * Handle pointer up event (capture phase)
      */
-    onMouseUp(event) {
+    onPointerUp(event) {
         if (this.isDragging) {
+            // Stop OrbitControls from seeing this event
+            event.stopImmediatePropagation();
+            event.preventDefault();
+
             this.isDragging = false;
             this.isHoveringHandle = false;
 
@@ -821,15 +816,16 @@ class RobotArmController {
      */
     onTouchStart(event) {
         if (event.touches.length === 1) {
-            event.preventDefault();
-
             const touch = event.touches[0];
             this.getMouseCoords(touch);
             this.raycaster.setFromCamera(this.mouse, this.camera);
 
             const intersects = this.raycaster.intersectObject(this.dragHandle, true);
+            const isNearHandle = this.isClickNearDragHandle(50);
 
-            if (intersects.length > 0) {
+            if (intersects.length > 0 || isNearHandle) {
+                event.stopImmediatePropagation();
+                event.preventDefault();
                 this.isDragging = true;
                 this.controls.enabled = false;
                 this.updateDragPlane();
