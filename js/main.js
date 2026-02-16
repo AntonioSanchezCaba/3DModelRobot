@@ -389,16 +389,20 @@ class RobotArmController {
         this.joint2Pivot.add(this.joint3Pivot);
 
         // Forearm (Link 3) - extends along local +X when θ3=0
-        const link3Geometry = new THREE.BoxGeometry(L3, 10, 10);
+        // Forearm visual is shorter to leave room for the cone (which represents the tool)
+        const forearmLength = L3 - 20;  // 60mm visual forearm + 20mm cone = L3 total
+        const link3Geometry = new THREE.BoxGeometry(forearmLength, 10, 10);
         this.link3Mesh = new THREE.Mesh(link3Geometry, link3Material);
-        this.link3Mesh.position.x = L3 / 2;
+        this.link3Mesh.position.x = forearmLength / 2;  // Center at 30
         this.link3Mesh.castShadow = true;
         this.joint3Pivot.add(this.link3Mesh);
 
-        // End effector
+        // End effector cone - TIP is at kinematic end effector position (L3 from elbow)
+        // Cone height=20, centered at origin, after rotation: base at local x=-10, tip at +10
+        // To have base at forearmLength (60) and tip at L3 (80): position.x = 70
         const endEffectorGeometry = new THREE.ConeGeometry(8, 20, 32);
         this.endEffectorMesh = new THREE.Mesh(endEffectorGeometry, endEffectorMaterial);
-        this.endEffectorMesh.position.x = L3 + 10;
+        this.endEffectorMesh.position.x = forearmLength + 10;  // 70: base at 60, tip at 80=L3
         this.endEffectorMesh.rotation.z = -Math.PI / 2;  // Point along X
         this.endEffectorMesh.castShadow = true;
         this.joint3Pivot.add(this.endEffectorMesh);
