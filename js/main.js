@@ -608,19 +608,22 @@ class RobotArmController {
      * This ensures the handle is always at the correct kinematic end effector position
      */
     updateDragHandlePosition() {
-        if (!this.dragHandle || !this.kinematics) return;
+        if (!this.dragHandle || !this.endEffectorMesh) return;
 
-        // Calculate end effector position from kinematics
-        const fk = this.kinematics.forwardKinematics(this.currentAngles);
+        // Get the world position of the cone mesh center
+        const worldPos = new THREE.Vector3();
+        this.endEffectorMesh.getWorldPosition(worldPos);
 
-        // Convert kinematics coords to Three.js coords
-        // Kinematics: X=forward, Y=left, Z=up
-        // Three.js mapping: kinX->threeX, kinY->threeZ, kinZ->threeY
-        const threeX = fk.position.x;
-        const threeY = fk.position.z + 12;  // Add base height offset (base platform)
-        const threeZ = fk.position.y;
+        // The cone tip is 10 units along the mesh's local X axis (after z-rotation)
+        // Transform this offset by the cone's world rotation to get actual tip position
+        const tipOffset = new THREE.Vector3(10, 0, 0);
+        const worldQuat = new THREE.Quaternion();
+        this.endEffectorMesh.getWorldQuaternion(worldQuat);
+        tipOffset.applyQuaternion(worldQuat);
 
-        this.dragHandle.position.set(threeX, threeY, threeZ);
+        // Position drag handle exactly at the visual cone tip
+        worldPos.add(tipOffset);
+        this.dragHandle.position.copy(worldPos);
     }
 
     /**
