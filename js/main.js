@@ -127,12 +127,17 @@ class RobotArmController {
     }
 
     /**
-     * Verify initial position matches kinematics
+     * Verify initial position matches kinematics at startup
      */
     verifyInitialPosition() {
         const fk = this.kinematics.forwardKinematics([0, 0, 0]);
-        console.log('Home position (θ1=0, θ2=0, θ3=0):', fk.position);
-        console.log('Expected: X=180, Y=0, Z=50');
+        // Home position should be X=180, Y=0, Z=50 (L2+L3, 0, L1)
+        const ok = Math.abs(fk.position.x - 180) < 0.01 &&
+                   Math.abs(fk.position.y) < 0.01 &&
+                   Math.abs(fk.position.z - 50) < 0.01;
+        if (!ok) {
+            console.warn('Kinematics home position mismatch:', fk.position);
+        }
     }
 
     /**
@@ -389,8 +394,8 @@ class RobotArmController {
         this.joint2Pivot.add(this.joint3Pivot);
 
         // Forearm (Link 3) - extends along local +X when θ3=0
-        // Forearm visual is shorter to leave room for the cone (which represents the tool)
-        const forearmLength = L3 - 20;  // 60mm visual forearm + 20mm cone = L3 total
+        // Forearm visual is shorter to leave room for the cone (tip = kinematic end effector)
+        const forearmLength = Math.max(10, L3 - 20);  // Visual: leave 20mm for cone
         const link3Geometry = new THREE.BoxGeometry(forearmLength, 10, 10);
         this.link3Mesh = new THREE.Mesh(link3Geometry, link3Material);
         this.link3Mesh.position.x = forearmLength / 2;  // Center at 30
@@ -596,10 +601,6 @@ class RobotArmController {
         this.updateDragHandlePosition();
 
         this.scene.add(this.dragHandle);
-
-        // Debug: Confirm drag handle was created and added
-        console.log('Drag handle created at:', this.dragHandle.position);
-        console.log('Drag handle geometry bounding sphere:', this.dragHandle.geometry.boundingSphere);
     }
 
     /**
@@ -661,29 +662,21 @@ class RobotArmController {
     }
 
     /**
-     * Check if click is near the drag handle (screen-space distance check)
+     * Fallback click detection: project handle to screen and check pixel distance.
+     * Used when raycaster misses due to depth or geometry issues.
      */
     isClickNearDragHandle(threshold = 30) {
-        // Project drag handle position to screen coordinates
         const handleScreenPos = this.dragHandle.position.clone();
         handleScreenPos.project(this.camera);
 
-        // Convert to pixel coordinates
         const canvas = this.renderer.domElement;
         const handleX = (handleScreenPos.x + 1) / 2 * canvas.clientWidth;
         const handleY = (-handleScreenPos.y + 1) / 2 * canvas.clientHeight;
-
-        // Get mouse pixel coordinates
         const mouseX = (this.mouse.x + 1) / 2 * canvas.clientWidth;
         const mouseY = (-this.mouse.y + 1) / 2 * canvas.clientHeight;
 
-        // Calculate distance
-        const distance = Math.sqrt(
-            Math.pow(handleX - mouseX, 2) + Math.pow(handleY - mouseY, 2)
-        );
-
-        console.log('Screen distance to handle:', distance.toFixed(1), 'px (threshold:', threshold, ')');
-        return distance < threshold;
+        const dist = Math.sqrt((handleX - mouseX) ** 2 + (handleY - mouseY) ** 2);
+        return dist < threshold;
     }
 
     /**
@@ -693,13 +686,9 @@ class RobotArmController {
         this.getMouseCoords(event);
         this.raycaster.setFromCamera(this.mouse, this.camera);
 
-        // Check if clicking on drag handle using both methods
         const intersects = this.raycaster.intersectObject(this.dragHandle, true);
-        const isNearHandle = this.isClickNearDragHandle(40);
 
-        console.log('[Drag] pointerdown - raycaster:', intersects.length, '| nearHandle:', isNearHandle);
-
-        if (intersects.length > 0 || isNearHandle) {
+        if (intersects.length > 0 || this.isClickNearDragHandle(40)) {
             // CRITICAL: Stop the event from reaching OrbitControls
             event.stopImmediatePropagation();
             event.preventDefault();
@@ -736,6 +725,10 @@ class RobotArmController {
             event.stopImmediatePropagation();
             event.preventDefault();
 
+            // Keep drag plane updated to current handle position so mouse
+            // projection is always relative to the arm's actual tip position
+            this.updateDragPlane();
+
             // Raycast against drag plane
             const intersects = this.raycaster.intersectObject(this.dragPlane);
 
@@ -751,12 +744,9 @@ class RobotArmController {
                 const ikResult = this.kinematics.inverseKinematics(kinX, kinY, kinZ);
 
                 if (ikResult.valid) {
-                    // Apply the calculated angles
                     this.applyAnglesFromIK(ikResult.angles);
-
-                    // Update UI displays
                     this.updateUIFromAngles(ikResult.angles);
-
+                    this.dragHandle.material.color.setHex(0xffff00);
                     this.updateStatus(`Pos: X=${kinX.toFixed(1)}, Y=${kinY.toFixed(1)}, Z=${kinZ.toFixed(1)}`);
                 } else {
                     this.updateStatus(`Fuera de alcance: ${ikResult.error || 'Posición no válida'}`);
@@ -764,11 +754,10 @@ class RobotArmController {
                 }
             }
         } else {
-            // Hover detection - check if mouse is near the drag handle
+            // Hover detection using raycaster
             const intersects = this.raycaster.intersectObject(this.dragHandle, true);
-            const isNearHandle = this.isClickNearDragHandle(50);
 
-            if (intersects.length > 0 || isNearHandle) {
+            if (intersects.length > 0 || this.isClickNearDragHandle(50)) {
                 this.dragHandle.material.color.setHex(0x00ffaa);
                 this.dragHandle.material.opacity = 0.8;
                 document.body.style.cursor = 'grab';
@@ -849,6 +838,9 @@ class RobotArmController {
             this.getMouseCoords(touch);
             this.raycaster.setFromCamera(this.mouse, this.camera);
 
+            // Keep drag plane at current handle position
+            this.updateDragPlane();
+
             const intersects = this.raycaster.intersectObject(this.dragPlane);
 
             if (intersects.length > 0) {
@@ -874,9 +866,10 @@ class RobotArmController {
     onTouchEnd(event) {
         if (this.isDragging) {
             this.isDragging = false;
+            this.isHoveringHandle = false;
             this.controls.enabled = true;
             this.dragHandle.material.color.setHex(0x00ff88);
-            this.dragHandle.material.opacity = 0.6;
+            this.dragHandle.material.opacity = 0.7;
         }
     }
 
