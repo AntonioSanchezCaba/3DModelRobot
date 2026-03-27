@@ -282,6 +282,26 @@ class RobotKinematics {
     }
 
     /**
+     * Check if a configuration keeps all arm parts above the floor (Z >= 0)
+     * @param {Array} angles - Joint angles [theta1, theta2, theta3] in degrees
+     * @returns {Object} {valid: boolean, elbowZ: number, endEffectorZ: number}
+     */
+    isConfigurationAboveFloor(angles) {
+        const fk = this.forwardKinematics(angles);
+        const elbowZ = fk.positions.elbow.z;
+        const endZ = fk.positions.endEffector.z;
+
+        // Both elbow and end effector must be at or above floor level
+        const minFloorZ = 0;
+
+        return {
+            valid: elbowZ >= minFloorZ && endZ >= minFloorZ,
+            elbowZ: elbowZ,
+            endEffectorZ: endZ
+        };
+    }
+
+    /**
      * Clamp a target position to the reachable workspace
      * Returns the nearest valid position if the target is outside the workspace
      *

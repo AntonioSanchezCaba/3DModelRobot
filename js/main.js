@@ -753,20 +753,30 @@ class RobotArmController {
                 const ikResult = this.kinematics.inverseKinematics(kinX, kinY, kinZ);
 
                 if (ikResult.valid) {
-                    this.applyAnglesFromIK(ikResult.angles);
-                    this.updateUIFromAngles(ikResult.angles);
+                    // Check if configuration keeps all arm parts above floor
+                    const floorCheck = this.kinematics.isConfigurationAboveFloor(ikResult.angles);
 
-                    if (clamped.wasClamped) {
-                        this.dragHandle.material.color.setHex(0xffaa00);  // Orange: at boundary
-                        this.updateStatus(`Límite: X=${kinX.toFixed(1)}, Y=${kinY.toFixed(1)}, Z=${kinZ.toFixed(1)}`);
+                    if (floorCheck.valid) {
+                        // Valid configuration - apply it
+                        this.applyAnglesFromIK(ikResult.angles);
+                        this.updateUIFromAngles(ikResult.angles);
+
+                        if (clamped.wasClamped) {
+                            this.dragHandle.material.color.setHex(0xff4444);  // Red: at boundary
+                            this.updateStatus(`⚠ Límite: X=${kinX.toFixed(1)}, Y=${kinY.toFixed(1)}, Z=${kinZ.toFixed(1)}`);
+                        } else {
+                            this.dragHandle.material.color.setHex(0x00ff00);  // Green: normal drag
+                            this.updateStatus(`Pos: X=${kinX.toFixed(1)}, Y=${kinY.toFixed(1)}, Z=${kinZ.toFixed(1)}`);
+                        }
                     } else {
-                        this.dragHandle.material.color.setHex(0xffff00);  // Yellow: normal drag
-                        this.updateStatus(`Pos: X=${kinX.toFixed(1)}, Y=${kinY.toFixed(1)}, Z=${kinZ.toFixed(1)}`);
+                        // Configuration would put arm below floor - don't apply
+                        this.dragHandle.material.color.setHex(0xff0000);  // Bright red: blocked
+                        this.updateStatus(`⛔ Codo bajo suelo (Z=${floorCheck.elbowZ.toFixed(1)}mm)`);
                     }
                 } else {
-                    // Even if IK fails after clamping, keep status (shouldn't happen normally)
-                    this.updateStatus(`Error: ${ikResult.error || 'Posición no válida'}`);
-                    this.dragHandle.material.color.setHex(0xff4444);
+                    // IK failed - don't move
+                    this.updateStatus(`⛔ ${ikResult.error || 'Posición no válida'}`);
+                    this.dragHandle.material.color.setHex(0xff0000);
                 }
             }
         } else {
@@ -875,11 +885,21 @@ class RobotArmController {
                 const ikResult = this.kinematics.inverseKinematics(kinX, kinY, kinZ);
 
                 if (ikResult.valid) {
-                    this.applyAnglesFromIK(ikResult.angles);
-                    this.updateUIFromAngles(ikResult.angles);
+                    // Check if configuration keeps all arm parts above floor
+                    const floorCheck = this.kinematics.isConfigurationAboveFloor(ikResult.angles);
 
-                    if (clamped.wasClamped) {
-                        this.dragHandle.material.color.setHex(0xffaa00);  // Orange: at boundary
+                    if (floorCheck.valid) {
+                        this.applyAnglesFromIK(ikResult.angles);
+                        this.updateUIFromAngles(ikResult.angles);
+
+                        if (clamped.wasClamped) {
+                            this.dragHandle.material.color.setHex(0xff4444);  // Red: at boundary
+                        } else {
+                            this.dragHandle.material.color.setHex(0x00ff00);  // Green: normal
+                        }
+                    } else {
+                        // Configuration would put arm below floor
+                        this.dragHandle.material.color.setHex(0xff0000);  // Bright red
                     }
                 }
             }
