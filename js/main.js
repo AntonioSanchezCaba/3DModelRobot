@@ -739,20 +739,33 @@ class RobotArmController {
                 const point = intersects[0].point;
 
                 // Convert Three.js coords to kinematics coords
-                const kinX = point.x;
-                const kinY = point.z;
-                const kinZ = point.y - 12;  // Remove base offset
+                let kinX = point.x;
+                let kinY = point.z;
+                let kinZ = point.y - 12;  // Remove base offset
 
-                // Calculate inverse kinematics
+                // Clamp position to workspace boundaries
+                const clamped = this.kinematics.clampToWorkspace(kinX, kinY, kinZ);
+                kinX = clamped.x;
+                kinY = clamped.y;
+                kinZ = clamped.z;
+
+                // Calculate inverse kinematics with clamped position
                 const ikResult = this.kinematics.inverseKinematics(kinX, kinY, kinZ);
 
                 if (ikResult.valid) {
                     this.applyAnglesFromIK(ikResult.angles);
                     this.updateUIFromAngles(ikResult.angles);
-                    this.dragHandle.material.color.setHex(0xffff00);
-                    this.updateStatus(`Pos: X=${kinX.toFixed(1)}, Y=${kinY.toFixed(1)}, Z=${kinZ.toFixed(1)}`);
+
+                    if (clamped.wasClamped) {
+                        this.dragHandle.material.color.setHex(0xffaa00);  // Orange: at boundary
+                        this.updateStatus(`Límite: X=${kinX.toFixed(1)}, Y=${kinY.toFixed(1)}, Z=${kinZ.toFixed(1)}`);
+                    } else {
+                        this.dragHandle.material.color.setHex(0xffff00);  // Yellow: normal drag
+                        this.updateStatus(`Pos: X=${kinX.toFixed(1)}, Y=${kinY.toFixed(1)}, Z=${kinZ.toFixed(1)}`);
+                    }
                 } else {
-                    this.updateStatus(`Fuera de alcance: ${ikResult.error || 'Posición no válida'}`);
+                    // Even if IK fails after clamping, keep status (shouldn't happen normally)
+                    this.updateStatus(`Error: ${ikResult.error || 'Posición no válida'}`);
                     this.dragHandle.material.color.setHex(0xff4444);
                 }
             }
@@ -849,15 +862,25 @@ class RobotArmController {
             if (intersects.length > 0) {
                 const point = intersects[0].point;
 
-                const kinX = point.x;
-                const kinY = point.z;
-                const kinZ = point.y - 12;
+                let kinX = point.x;
+                let kinY = point.z;
+                let kinZ = point.y - 12;
+
+                // Clamp position to workspace boundaries
+                const clamped = this.kinematics.clampToWorkspace(kinX, kinY, kinZ);
+                kinX = clamped.x;
+                kinY = clamped.y;
+                kinZ = clamped.z;
 
                 const ikResult = this.kinematics.inverseKinematics(kinX, kinY, kinZ);
 
                 if (ikResult.valid) {
                     this.applyAnglesFromIK(ikResult.angles);
                     this.updateUIFromAngles(ikResult.angles);
+
+                    if (clamped.wasClamped) {
+                        this.dragHandle.material.color.setHex(0xffaa00);  // Orange: at boundary
+                    }
                 }
             }
         }

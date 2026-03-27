@@ -282,6 +282,83 @@ class RobotKinematics {
     }
 
     /**
+     * Clamp a target position to the reachable workspace
+     * Returns the nearest valid position if the target is outside the workspace
+     *
+     * @param {number} x - Target X coordinate (kinematics frame)
+     * @param {number} y - Target Y coordinate (kinematics frame)
+     * @param {number} z - Target Z coordinate (kinematics frame)
+     * @returns {Object} Clamped position {x, y, z, wasClamped}
+     */
+    clampToWorkspace(x, y, z) {
+        const result = { x, y, z, wasClamped: false };
+
+        // Calculate horizontal distance and relative height
+        const r = Math.sqrt(x * x + y * y);
+        const zRel = z - this.L1;  // Height relative to shoulder
+
+        // Distance from shoulder to target in the arm plane
+        const D = Math.sqrt(r * r + zRel * zRel);
+
+        // Workspace boundaries
+        const maxReach = this.L2 + this.L3;
+        const minReach = Math.abs(this.L2 - this.L3);
+
+        // Minimum Z constraint - don't go below base level (with small margin)
+        const minZ = 0;  // Can't go below the base
+
+        // First, clamp Z to minimum
+        if (z < minZ) {
+            result.z = minZ;
+            result.wasClamped = true;
+        }
+
+        // Recalculate with clamped Z
+        const clampedZRel = result.z - this.L1;
+        const newD = Math.sqrt(r * r + clampedZRel * clampedZRel);
+
+        // If distance exceeds max reach, scale position to max reach
+        if (newD > maxReach) {
+            // Scale factor to bring to max reach (with small margin for numerical stability)
+            const scale = (maxReach - 0.1) / newD;
+
+            // Scale the horizontal distance
+            const newR = r * scale;
+            const newZRel = clampedZRel * scale;
+
+            // Preserve the direction in XY plane
+            if (r > 0.001) {
+                result.x = x * (newR / r);
+                result.y = y * (newR / r);
+            }
+            result.z = newZRel + this.L1;
+            result.wasClamped = true;
+        }
+        // If distance is less than min reach, push to min reach
+        else if (newD < minReach && newD > 0.001) {
+            const scale = (minReach + 0.1) / newD;
+
+            const newR = r * scale;
+            const newZRel = clampedZRel * scale;
+
+            if (r > 0.001) {
+                result.x = x * (newR / r);
+                result.y = y * (newR / r);
+            }
+            result.z = newZRel + this.L1;
+            result.wasClamped = true;
+        }
+
+        // Final Z clamp check after scaling
+        if (result.z < minZ) {
+            result.z = minZ;
+            result.wasClamped = true;
+        }
+
+        return result;
+    }
+
+    /**
      * Verify forward/inverse kinematics consistency
      * @param {Array} angles - Test angles [theta1, theta2, theta3]
      * @returns {Object} Verification result
