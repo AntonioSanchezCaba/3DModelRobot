@@ -887,7 +887,8 @@ class RobotArmController {
 
             switch (i) {
                 case 0:
-                    this.joint1Pivot.rotation.y = angleRad;
+                    // Negate: Three.js Y+ rotation is toward -Z, but kinematics θ1+ is toward +kinY = +threeZ
+                    this.joint1Pivot.rotation.y = -angleRad;
                     break;
                 case 1:
                     this.joint2Pivot.rotation.z = angleRad;
@@ -941,7 +942,8 @@ class RobotArmController {
         switch (jointIndex) {
             case 0:
                 // θ1: Base rotation around Y axis
-                this.joint1Pivot.rotation.y = angleRad;
+                // Negate: Three.js Y+ rotation is toward -Z, but kinematics θ1+ is toward +kinY = +threeZ
+                this.joint1Pivot.rotation.y = -angleRad;
                 break;
             case 1:
                 // θ2: Shoulder pitch - rotation around Z axis in local frame
