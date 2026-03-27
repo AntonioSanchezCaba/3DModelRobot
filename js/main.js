@@ -59,7 +59,9 @@ class RobotArmController {
         // Interactive dragging
         this.isDragging = false;
         this.isHoveringHandle = false;
-        this.dragHandle = null;
+        this.dragHandle = null;        // End effector handle
+        this.elbowDragHandle = null;   // Elbow joint handle
+        this.activeHandle = null;      // Currently dragged handle ('end' or 'elbow')
         this.dragPlane = null;
         this.raycaster = null;
         this.mouse = null;
@@ -543,8 +545,9 @@ class RobotArmController {
         this.mouse = new THREE.Vector2();
         this.intersection = new THREE.Vector3();
 
-        // Create draggable handle at end effector
-        this.createDragHandle();
+        // Create draggable handles
+        this.createDragHandle();       // End effector
+        this.createElbowDragHandle();  // Elbow joint
 
         // Create invisible drag plane
         this.createDragPlane();
@@ -604,6 +607,56 @@ class RobotArmController {
     }
 
     /**
+     * Create draggable handle at elbow joint
+     */
+    createElbowDragHandle() {
+        const geometry = new THREE.SphereGeometry(12, 32, 32);
+        geometry.computeBoundingSphere();
+
+        const material = new THREE.MeshBasicMaterial({
+            color: 0x8888ff,  // Blue-ish to distinguish from end effector
+            transparent: true,
+            opacity: 0.7,
+            depthTest: false
+        });
+
+        this.elbowDragHandle = new THREE.Mesh(geometry, material);
+        this.elbowDragHandle.name = 'elbowDragHandle';
+        this.elbowDragHandle.renderOrder = 998;
+
+        // Add outer ring
+        const ringGeometry = new THREE.TorusGeometry(16, 2.5, 16, 32);
+        ringGeometry.computeBoundingSphere();
+        const ringMaterial = new THREE.MeshBasicMaterial({
+            color: 0x8888ff,
+            transparent: true,
+            opacity: 0.9,
+            depthTest: false
+        });
+        const ring = new THREE.Mesh(ringGeometry, ringMaterial);
+        ring.renderOrder = 998;
+        this.elbowDragHandle.add(ring);
+
+        // Position at elbow
+        this.updateElbowDragHandlePosition();
+
+        this.scene.add(this.elbowDragHandle);
+    }
+
+    /**
+     * Update elbow drag handle position based on forward kinematics
+     */
+    updateElbowDragHandlePosition() {
+        if (!this.elbowDragHandle || !this.joint3Pivot) return;
+
+        // Get the world position of joint3Pivot (elbow)
+        const worldPos = new THREE.Vector3();
+        this.joint3Pivot.getWorldPosition(worldPos);
+
+        this.elbowDragHandle.position.copy(worldPos);
+    }
+
+    /**
      * Update drag handle position based on forward kinematics
      * This ensures the handle is always at the correct kinematic end effector position
      */
@@ -624,6 +677,9 @@ class RobotArmController {
         // Position drag handle exactly at the visual cone tip
         worldPos.add(tipOffset);
         this.dragHandle.position.copy(worldPos);
+
+        // Also update elbow handle
+        this.updateElbowDragHandlePosition();
     }
 
     /**
@@ -644,10 +700,14 @@ class RobotArmController {
      * Update drag plane to face camera
      */
     updateDragPlane() {
-        if (!this.dragPlane || !this.dragHandle) return;
+        if (!this.dragPlane) return;
 
-        // Position plane at drag handle
-        this.dragPlane.position.copy(this.dragHandle.position);
+        // Position plane at the active handle
+        if (this.activeHandle === 'elbow' && this.elbowDragHandle) {
+            this.dragPlane.position.copy(this.elbowDragHandle.position);
+        } else if (this.dragHandle) {
+            this.dragPlane.position.copy(this.dragHandle.position);
+        }
 
         // Make plane face the camera
         this.dragPlane.lookAt(this.camera.position);
@@ -669,7 +729,16 @@ class RobotArmController {
      * Used when raycaster misses due to depth or geometry issues.
      */
     isClickNearDragHandle(threshold = 30) {
-        const handleScreenPos = this.dragHandle.position.clone();
+        return this.isClickNearHandle(this.dragHandle, threshold);
+    }
+
+    /**
+     * Check if click is near a specific handle (screen-space check)
+     */
+    isClickNearHandle(handle, threshold = 30) {
+        if (!handle) return false;
+
+        const handleScreenPos = handle.position.clone();
         handleScreenPos.project(this.camera);
 
         const canvas = this.renderer.domElement;
@@ -689,30 +758,55 @@ class RobotArmController {
         this.getMouseCoords(event);
         this.raycaster.setFromCamera(this.mouse, this.camera);
 
-        const intersects = this.raycaster.intersectObject(this.dragHandle, true);
+        // Check end effector handle
+        const endEffectorHit = this.raycaster.intersectObject(this.dragHandle, true);
+        const isNearEndHandle = this.isClickNearHandle(this.dragHandle, 40);
 
-        if (intersects.length > 0 || this.isClickNearDragHandle(40)) {
+        // Check elbow handle
+        const elbowHit = this.elbowDragHandle ?
+            this.raycaster.intersectObject(this.elbowDragHandle, true) : [];
+        const isNearElbowHandle = this.isClickNearHandle(this.elbowDragHandle, 35);
+
+        // Determine which handle was clicked (prefer direct hit over "near")
+        let clickedHandle = null;
+        if (endEffectorHit.length > 0) {
+            clickedHandle = 'end';
+        } else if (elbowHit.length > 0) {
+            clickedHandle = 'elbow';
+        } else if (isNearEndHandle) {
+            clickedHandle = 'end';
+        } else if (isNearElbowHandle) {
+            clickedHandle = 'elbow';
+        }
+
+        if (clickedHandle) {
             // CRITICAL: Stop the event from reaching OrbitControls
             event.stopImmediatePropagation();
             event.preventDefault();
 
             this.isDragging = true;
+            this.activeHandle = clickedHandle;
             this.controls.enabled = false;
 
-            // Update drag plane to face camera at handle position
+            // Update drag plane based on which handle
             this.updateDragPlane();
 
             // Change handle color to indicate active dragging
-            this.dragHandle.material.color.setHex(0xffff00);
-            this.dragHandle.material.opacity = 0.9;
+            if (clickedHandle === 'end') {
+                this.dragHandle.material.color.setHex(0xffff00);
+                this.dragHandle.material.opacity = 0.9;
+                this.updateStatus('Arrastrando efector final...');
+            } else {
+                this.elbowDragHandle.material.color.setHex(0xffff00);
+                this.elbowDragHandle.material.opacity = 0.9;
+                this.updateStatus('Arrastrando codo...');
+            }
 
             // Visual feedback
             document.body.classList.add('dragging-active');
             document.body.style.cursor = 'grabbing';
             const indicator = document.getElementById('drag-indicator');
             if (indicator) indicator.classList.add('active');
-
-            this.updateStatus('Arrastrando efector final...');
         }
     }
 
@@ -728,8 +822,7 @@ class RobotArmController {
             event.stopImmediatePropagation();
             event.preventDefault();
 
-            // Keep drag plane updated to current handle position so mouse
-            // projection is always relative to the arm's actual tip position
+            // Keep drag plane updated to current handle position
             this.updateDragPlane();
 
             // Raycast against drag plane
@@ -738,64 +831,140 @@ class RobotArmController {
             if (intersects.length > 0) {
                 const point = intersects[0].point;
 
-                // Convert Three.js coords to kinematics coords
-                let kinX = point.x;
-                let kinY = point.z;
-                let kinZ = point.y - 12;  // Remove base offset
-
-                // Clamp position to workspace boundaries
-                const clamped = this.kinematics.clampToWorkspace(kinX, kinY, kinZ);
-                kinX = clamped.x;
-                kinY = clamped.y;
-                kinZ = clamped.z;
-
-                // Calculate inverse kinematics with clamped position
-                const ikResult = this.kinematics.inverseKinematics(kinX, kinY, kinZ);
-
-                if (ikResult.valid) {
-                    // Check if configuration keeps all arm parts above floor
-                    const floorCheck = this.kinematics.isConfigurationAboveFloor(ikResult.angles);
-
-                    if (floorCheck.valid) {
-                        // Valid configuration - apply it
-                        this.applyAnglesFromIK(ikResult.angles);
-                        this.updateUIFromAngles(ikResult.angles);
-
-                        if (clamped.wasClamped) {
-                            this.dragHandle.material.color.setHex(0xff4444);  // Red: at boundary
-                            this.updateStatus(`⚠ Límite: X=${kinX.toFixed(1)}, Y=${kinY.toFixed(1)}, Z=${kinZ.toFixed(1)}`);
-                        } else {
-                            this.dragHandle.material.color.setHex(0x00ff00);  // Green: normal drag
-                            this.updateStatus(`Pos: X=${kinX.toFixed(1)}, Y=${kinY.toFixed(1)}, Z=${kinZ.toFixed(1)}`);
-                        }
-                    } else {
-                        // Configuration would put arm below floor - don't apply
-                        this.dragHandle.material.color.setHex(0xff0000);  // Bright red: blocked
-                        this.updateStatus(`⛔ Codo bajo suelo (Z=${floorCheck.elbowZ.toFixed(1)}mm)`);
-                    }
-                } else {
-                    // IK failed - don't move
-                    this.updateStatus(`⛔ ${ikResult.error || 'Posición no válida'}`);
-                    this.dragHandle.material.color.setHex(0xff0000);
+                if (this.activeHandle === 'end') {
+                    // End effector dragging - full IK
+                    this.handleEndEffectorDrag(point);
+                } else if (this.activeHandle === 'elbow') {
+                    // Elbow dragging - only affects θ1 and θ2
+                    this.handleElbowDrag(point);
                 }
             }
         } else {
-            // Hover detection using raycaster
-            const intersects = this.raycaster.intersectObject(this.dragHandle, true);
+            // Hover detection for both handles
+            const endHit = this.raycaster.intersectObject(this.dragHandle, true);
+            const elbowHit = this.elbowDragHandle ?
+                this.raycaster.intersectObject(this.elbowDragHandle, true) : [];
+            const isNearEnd = this.isClickNearHandle(this.dragHandle, 50);
+            const isNearElbow = this.isClickNearHandle(this.elbowDragHandle, 40);
 
-            if (intersects.length > 0 || this.isClickNearDragHandle(50)) {
+            if (endHit.length > 0 || isNearEnd) {
                 this.dragHandle.material.color.setHex(0x00ffaa);
                 this.dragHandle.material.opacity = 0.8;
                 document.body.style.cursor = 'grab';
                 this.isHoveringHandle = true;
+            } else if (elbowHit.length > 0 || isNearElbow) {
+                this.elbowDragHandle.material.color.setHex(0xaaaaff);
+                this.elbowDragHandle.material.opacity = 0.8;
+                document.body.style.cursor = 'grab';
+                this.isHoveringHandle = true;
             } else {
+                // Reset both handles
                 this.dragHandle.material.color.setHex(0x00ff88);
                 this.dragHandle.material.opacity = 0.7;
+                if (this.elbowDragHandle) {
+                    this.elbowDragHandle.material.color.setHex(0x8888ff);
+                    this.elbowDragHandle.material.opacity = 0.7;
+                }
                 if (this.isHoveringHandle) {
                     document.body.style.cursor = 'default';
                     this.isHoveringHandle = false;
                 }
             }
+            return; // Skip old hover code below
+        }
+    }
+
+    /**
+     * Handle end effector drag - full inverse kinematics
+     */
+    handleEndEffectorDrag(point) {
+        // Convert Three.js coords to kinematics coords
+        let kinX = point.x;
+        let kinY = point.z;
+        let kinZ = point.y - 12;  // Remove base offset
+
+        // Clamp position to workspace boundaries
+        const clamped = this.kinematics.clampToWorkspace(kinX, kinY, kinZ);
+        kinX = clamped.x;
+        kinY = clamped.y;
+        kinZ = clamped.z;
+
+        // Calculate inverse kinematics
+        const ikResult = this.kinematics.inverseKinematics(kinX, kinY, kinZ);
+
+        if (ikResult.valid) {
+            const floorCheck = this.kinematics.isConfigurationAboveFloor(ikResult.angles);
+
+            if (floorCheck.valid) {
+                this.applyAnglesFromIK(ikResult.angles);
+                this.updateUIFromAngles(ikResult.angles);
+
+                if (clamped.wasClamped) {
+                    this.dragHandle.material.color.setHex(0xff4444);
+                    this.updateStatus(`⚠ Límite: X=${kinX.toFixed(1)}, Y=${kinY.toFixed(1)}, Z=${kinZ.toFixed(1)}`);
+                } else {
+                    this.dragHandle.material.color.setHex(0x00ff00);
+                    this.updateStatus(`Pos: X=${kinX.toFixed(1)}, Y=${kinY.toFixed(1)}, Z=${kinZ.toFixed(1)}`);
+                }
+            } else {
+                this.dragHandle.material.color.setHex(0xff0000);
+                this.updateStatus(`⛔ Codo bajo suelo (Z=${floorCheck.elbowZ.toFixed(1)}mm)`);
+            }
+        } else {
+            this.updateStatus(`⛔ ${ikResult.error || 'Posición no válida'}`);
+            this.dragHandle.material.color.setHex(0xff0000);
+        }
+    }
+
+    /**
+     * Handle elbow drag - only affects θ1 (base) and θ2 (shoulder)
+     * θ3 (elbow) remains unchanged
+     */
+    handleElbowDrag(point) {
+        // Convert Three.js coords to kinematics coords
+        const kinX = point.x;
+        const kinY = point.z;
+        const kinZ = point.y - 12;  // Remove base offset
+
+        // Calculate θ1 from XY direction (base rotation)
+        const theta1 = Math.atan2(kinY, kinX) * 180 / Math.PI;
+
+        // Calculate horizontal distance from base
+        const r = Math.sqrt(kinX * kinX + kinY * kinY);
+
+        // Height relative to shoulder
+        const L1 = this.kinematics.L1;
+        const L2 = this.kinematics.L2;
+        const zRel = kinZ - L1;
+
+        // θ2 is the angle to reach that point with the upper arm
+        // The elbow should be at distance L2 from shoulder
+        // Clamp r to max L2 (can't extend upper arm beyond its length)
+        const effectiveR = Math.min(r, L2);
+        const effectiveZ = zRel;
+
+        // Calculate θ2: angle of upper arm from horizontal
+        // atan2(z, r) gives the angle to the target point
+        const theta2 = Math.atan2(effectiveZ, effectiveR) * 180 / Math.PI;
+
+        // Keep current θ3
+        const theta3 = this.currentAngles[2];
+
+        // Check if configuration is valid
+        const newAngles = [theta1, theta2, theta3];
+        const floorCheck = this.kinematics.isConfigurationAboveFloor(newAngles);
+
+        if (floorCheck.valid) {
+            // Apply angles
+            this.setJointAngle(0, theta1, true);  // Skip validation (we already checked)
+            this.setJointAngle(1, theta2, true);
+            this.updateUIFromAngles([theta1, theta2, theta3]);
+
+            this.elbowDragHandle.material.color.setHex(0x00ff00);
+            this.updateStatus(`Codo: θ₁=${theta1.toFixed(1)}°, θ₂=${theta2.toFixed(1)}°`);
+        } else {
+            this.elbowDragHandle.material.color.setHex(0xff0000);
+            this.updateStatus(`⛔ Codo bajo suelo (Z=${floorCheck.elbowZ.toFixed(1)}mm)`);
         }
     }
 
@@ -810,13 +979,18 @@ class RobotArmController {
 
             this.isDragging = false;
             this.isHoveringHandle = false;
+            this.activeHandle = null;
 
             // Re-enable orbit controls
             this.controls.enabled = true;
 
-            // Reset handle color
+            // Reset both handle colors
             this.dragHandle.material.color.setHex(0x00ff88);
             this.dragHandle.material.opacity = 0.7;
+            if (this.elbowDragHandle) {
+                this.elbowDragHandle.material.color.setHex(0x8888ff);
+                this.elbowDragHandle.material.opacity = 0.7;
+            }
 
             // Remove visual feedback
             document.body.classList.remove('dragging-active');
