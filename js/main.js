@@ -968,7 +968,7 @@ class RobotArmController {
     }
 
     /**
-     * Set joint angle
+     * Set joint angle with floor collision validation
      *
      * Joint mapping:
      * - Joint 0 (θ1): Base rotation around Y axis (Three.js Y = Kinematics Z)
@@ -977,9 +977,28 @@ class RobotArmController {
      *
      * @param {number} jointIndex - 0, 1, or 2
      * @param {number} angleDegrees - Angle in degrees
+     * @param {boolean} skipValidation - Skip floor validation (for internal use)
+     * @returns {boolean} True if angle was applied, false if blocked
      */
-    setJointAngle(jointIndex, angleDegrees) {
+    setJointAngle(jointIndex, angleDegrees, skipValidation = false) {
+        // Store previous angle in case we need to revert
+        const previousAngle = this.currentAngles[jointIndex];
+
+        // Temporarily set the new angle to test configuration
         this.currentAngles[jointIndex] = angleDegrees;
+
+        // Check if this configuration keeps arm above floor (unless skipping validation)
+        if (!skipValidation && this.kinematics) {
+            const floorCheck = this.kinematics.isConfigurationAboveFloor(this.currentAngles);
+            if (!floorCheck.valid) {
+                // Revert to previous angle - configuration would put arm below floor
+                this.currentAngles[jointIndex] = previousAngle;
+                this.updateStatus(`⛔ Configuración inválida: codo en Z=${floorCheck.elbowZ.toFixed(1)}mm`);
+                return false;
+            }
+        }
+
+        // Apply the angle to the 3D model
         const angleRad = angleDegrees * Math.PI / 180;
 
         switch (jointIndex) {
@@ -1007,6 +1026,8 @@ class RobotArmController {
         if (this.showTrajectory) {
             this.addTrajectoryPoint();
         }
+
+        return true;
     }
 
     /**

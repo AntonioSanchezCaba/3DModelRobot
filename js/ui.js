@@ -143,7 +143,22 @@ class UIController {
      */
     updateJoint(jointIndex, angle) {
         if (this.robot) {
-            this.robot.setJointAngle(jointIndex, angle);
+            const success = this.robot.setJointAngle(jointIndex, angle);
+
+            // If angle was rejected (arm would go below floor), revert slider
+            if (success === false) {
+                const control = document.querySelectorAll('.joint-control')[jointIndex];
+                const slider = control.querySelector('.joint-slider');
+                const input = control.querySelector('.angle-input');
+                const sliderFill = control.querySelector('.slider-fill');
+
+                // Get the actual current angle from the robot
+                const currentAngle = this.robot.getCurrentAngles()[jointIndex];
+                slider.value = currentAngle;
+                input.value = Math.round(currentAngle);
+                this.updateSliderFill(slider, sliderFill);
+                return;
+            }
         }
         this.updateKinematicsDisplay();
         this.updatePositionDisplay();
