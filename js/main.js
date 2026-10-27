@@ -14,6 +14,24 @@
  * - Kinematics Z -> Three.js Y
  */
 
+// Height of the base platform: kinematic Z = 0 sits this far above the Three.js ground
+const BASE_HEIGHT = 12;
+
+// Longest end-effector trail drawn when "Mostrar trayectoria" is on
+const MAX_TRAJECTORY_POINTS = 500;
+
+// How close (CSS px) the pointer must be to a handle's center to grab it
+const HANDLE_PICK_RADIUS = 45;
+const HANDLE_PICK_RADIUS_TOUCH = 60;
+
+// Drag handle colors (sphere + ring) for each interaction state
+const HANDLE_COLORS = {
+    end: { idle: 0x00ff88, hover: 0x7dffc4 },
+    elbow: { idle: 0x8888ff, hover: 0xb8b8ff },
+    dragging: 0xffd400,  // Yellow: following the cursor
+    limit: 0xff3b3b      // Red: held at the workspace / floor limit
+};
+
 class RobotArmController {
     constructor() {
         // Three.js components
@@ -41,7 +59,7 @@ class RobotArmController {
         this.axesHelper = null;
         this.gridHelper = null;
         this.trajectoryLine = null;
-        this.trajectoryPoints = [];
+        this.trajectoryCount = 0;
         this.targetMarker = null;
 
         // Kinematics
@@ -68,7 +86,8 @@ class RobotArmController {
         this.intersection = null;
 
         // Initialize
-        this.init();
+        // init() is async: report failures (e.g. no WebGL) instead of loading forever
+        this.init().catch(error => showStartupError(error));
     }
 
     /**
@@ -89,12 +108,10 @@ class RobotArmController {
         this.setupLighting();
         this.setupControls();
         this.setupHelpers();
+        this.setupAxesIndicator();
 
         // Create robot model
         this.createRobotModel();
-
-        // Try to load STL model
-        await this.loadSTLModel();
 
         // Create target marker
         this.createTargetMarker();
@@ -238,7 +255,19 @@ class RobotArmController {
         this.controls.maxDistance = 800;
         this.controls.maxPolarAngle = Math.PI / 2 + 0.3;
         this.controls.target.set(50, 50, 0);
+
+        // Narrow screens: start further away so the whole arm is visible
+        this.camera.position.sub(this.controls.target)
+            .multiplyScalar(this.viewDistanceFactor())
+            .add(this.controls.target);
         this.controls.update();
+    }
+
+    /**
+     * How much to pull the camera back on narrow (portrait) viewports so the whole arm fits
+     */
+    viewDistanceFactor() {
+        return Math.min(2.2, Math.max(1, 1.3 / this.camera.aspect));
     }
 
     /**
@@ -339,7 +368,7 @@ class RobotArmController {
         // JOINT 1 - BASE ROTATION (θ1 around Y axis)
         // ============================================
         this.joint1Pivot = new THREE.Group();
-        this.joint1Pivot.position.y = 12;  // On top of base
+        this.joint1Pivot.position.y = BASE_HEIGHT;  // On top of base
         this.robotGroup.add(this.joint1Pivot);
 
         // Vertical tower from base to shoulder (Link 1)
@@ -396,8 +425,10 @@ class RobotArmController {
         this.joint2Pivot.add(this.joint3Pivot);
 
         // Forearm (Link 3) - extends along local +X when θ3=0
-        // Forearm visual is shorter to leave room for the cone (tip = kinematic end effector)
-        const forearmLength = Math.max(10, L3 - 20);  // Visual: leave 20mm for cone
+        // Forearm visual is shorter to leave room for the cone (tip = kinematic end effector).
+        // The cone is 20mm long, or half the forearm when the forearm is very short.
+        const coneLength = Math.min(20, L3 / 2);
+        const forearmLength = L3 - coneLength;  // 60 for L3 = 80
         const link3Geometry = new THREE.BoxGeometry(forearmLength, 10, 10);
         this.link3Mesh = new THREE.Mesh(link3Geometry, link3Material);
         this.link3Mesh.position.x = forearmLength / 2;  // Center at 30
@@ -405,11 +436,11 @@ class RobotArmController {
         this.joint3Pivot.add(this.link3Mesh);
 
         // End effector cone - TIP is at kinematic end effector position (L3 from elbow)
-        // Cone height=20, centered at origin, after rotation: base at local x=-10, tip at +10
+        // Cone is centered at origin, after rotation: base at local x=-coneLength/2, tip at +coneLength/2
         // To have base at forearmLength (60) and tip at L3 (80): position.x = 70
-        const endEffectorGeometry = new THREE.ConeGeometry(8, 20, 32);
+        const endEffectorGeometry = new THREE.ConeGeometry(8 * coneLength / 20, coneLength, 32);
         this.endEffectorMesh = new THREE.Mesh(endEffectorGeometry, endEffectorMaterial);
-        this.endEffectorMesh.position.x = forearmLength + 10;  // 70: base at 60, tip at 80=L3
+        this.endEffectorMesh.position.x = forearmLength + coneLength / 2;  // 70: base at 60, tip at 80=L3
         this.endEffectorMesh.rotation.z = -Math.PI / 2;  // Point along X
         this.endEffectorMesh.castShadow = true;
         this.joint3Pivot.add(this.endEffectorMesh);
@@ -430,65 +461,6 @@ class RobotArmController {
         const shoulder = new THREE.AxesHelper(axesSize);
         shoulder.position.y = this.kinematics.L1;
         this.joint1Pivot.add(shoulder);
-    }
-
-    /**
-     * Load STL model (reference overlay)
-     */
-    async loadSTLModel() {
-        return new Promise((resolve) => {
-            const loader = new THREE.STLLoader();
-
-            loader.load(
-                'assembly.stl',
-                (geometry) => {
-                    geometry.computeBoundingBox();
-                    const bbox = geometry.boundingBox;
-                    const center = new THREE.Vector3();
-                    bbox.getCenter(center);
-
-                    geometry.translate(-center.x, -center.y, -center.z);
-
-                    const size = new THREE.Vector3();
-                    bbox.getSize(size);
-                    const maxDim = Math.max(size.x, size.y, size.z);
-                    const scale = 150 / maxDim;
-
-                    const material = new THREE.MeshStandardMaterial({
-                        color: 0x6366f1,
-                        metalness: 0.4,
-                        roughness: 0.5,
-                        transparent: true,
-                        opacity: 0.2,
-                        wireframe: false
-                    });
-
-                    const mesh = new THREE.Mesh(geometry, material);
-                    mesh.scale.set(scale, scale, scale);
-                    mesh.position.y = 80;
-                    mesh.castShadow = true;
-                    mesh.receiveShadow = true;
-
-                    this.stlMesh = mesh;
-                    this.scene.add(mesh);
-
-                    this.updateStatus('Modelo STL cargado');
-                    resolve(true);
-                },
-                (xhr) => {
-                    const progress = (xhr.loaded / xhr.total * 100);
-                    const progressFill = document.querySelector('.progress-fill');
-                    if (progressFill) {
-                        progressFill.style.width = `${progress}%`;
-                    }
-                },
-                (error) => {
-                    console.warn('Could not load STL file, using simplified model');
-                    this.updateStatus('Usando modelo simplificado');
-                    resolve(false);
-                }
-            );
-        });
     }
 
     /**
@@ -530,9 +502,15 @@ class RobotArmController {
             opacity: 0.6
         });
 
+        // Fixed-size buffer; only the first trajectoryCount points are drawn
         const geometry = new THREE.BufferGeometry();
+        geometry.setAttribute('position', new THREE.BufferAttribute(new Float32Array(MAX_TRAJECTORY_POINTS * 3), 3));
+        geometry.setDrawRange(0, 0);
+        this.trajectoryCount = 0;
+
         this.trajectoryLine = new THREE.Line(geometry, material);
         this.trajectoryLine.visible = false;
+        this.trajectoryLine.frustumCulled = false;  // Bounding sphere would be computed from the empty buffer
         this.scene.add(this.trajectoryLine);
     }
 
@@ -544,6 +522,7 @@ class RobotArmController {
         this.raycaster = new THREE.Raycaster();
         this.mouse = new THREE.Vector2();
         this.intersection = new THREE.Vector3();
+        this.tmpVector = new THREE.Vector3();  // Scratch vector for per-event math
 
         // Create draggable handles
         this.createDragHandle();       // End effector
@@ -561,86 +540,84 @@ class RobotArmController {
         canvas.addEventListener('pointerdown', (e) => this.onPointerDown(e), true);
         canvas.addEventListener('pointermove', (e) => this.onPointerMove(e), true);
         canvas.addEventListener('pointerup', (e) => this.onPointerUp(e), true);
-        canvas.addEventListener('pointerleave', (e) => this.onPointerUp(e), true);
+        canvas.addEventListener('pointercancel', (e) => this.onPointerUp(e), true);
+        canvas.addEventListener('lostpointercapture', (e) => this.onPointerUp(e), true);
 
-        // Touch support
-        canvas.addEventListener('touchstart', (e) => this.onTouchStart(e), { passive: false, capture: true });
-        canvas.addEventListener('touchmove', (e) => this.onTouchMove(e), { passive: false });
-        canvas.addEventListener('touchend', (e) => this.onTouchEnd(e));
+        // Pointer events also cover touch. Without this the browser would pan/zoom
+        // the page (and cancel the pointer) while a finger drags a handle.
+        canvas.style.touchAction = 'none';
+    }
+
+    /**
+     * Build a drag handle: translucent sphere + ring, drawn on top of the model
+     */
+    createHandle(name, radius, ringRadius, ringTube, color, renderOrder) {
+        const geometry = new THREE.SphereGeometry(radius, 32, 32);
+        geometry.computeBoundingSphere();  // Ensure bounding sphere is computed for raycasting
+
+        const material = new THREE.MeshBasicMaterial({
+            color: color,
+            transparent: true,
+            opacity: 0.7,
+            depthTest: false  // Render on top of everything
+        });
+
+        const handle = new THREE.Mesh(geometry, material);
+        handle.name = name;
+        handle.renderOrder = renderOrder;
+
+        // Outer ring for better visibility
+        const ringGeometry = new THREE.TorusGeometry(ringRadius, ringTube, 16, 32);
+        ringGeometry.computeBoundingSphere();
+        const ringMaterial = new THREE.MeshBasicMaterial({
+            color: color,
+            transparent: true,
+            opacity: 0.9,
+            depthTest: false
+        });
+        const ring = new THREE.Mesh(ringGeometry, ringMaterial);
+        ring.renderOrder = renderOrder;
+        handle.add(ring);
+
+        this.scene.add(handle);
+        return handle;
     }
 
     /**
      * Create draggable handle sphere at end effector
      */
     createDragHandle() {
-        const geometry = new THREE.SphereGeometry(15, 32, 32);  // Slightly larger for easier clicking
-        geometry.computeBoundingSphere();  // Ensure bounding sphere is computed for raycasting
-
-        const material = new THREE.MeshBasicMaterial({
-            color: 0x00ff88,
-            transparent: true,
-            opacity: 0.7,
-            depthTest: false  // Render on top of everything
-        });
-
-        this.dragHandle = new THREE.Mesh(geometry, material);
-        this.dragHandle.name = 'dragHandle';
-        this.dragHandle.renderOrder = 999;  // Render last (on top)
-
-        // Add outer ring for better visibility
-        const ringGeometry = new THREE.TorusGeometry(20, 3, 16, 32);
-        ringGeometry.computeBoundingSphere();
-        const ringMaterial = new THREE.MeshBasicMaterial({
-            color: 0x00ff88,
-            transparent: true,
-            opacity: 0.9,
-            depthTest: false
-        });
-        const ring = new THREE.Mesh(ringGeometry, ringMaterial);
-        ring.renderOrder = 999;
-        this.dragHandle.add(ring);
-
-        // Position at end effector
+        this.dragHandle = this.createHandle('dragHandle', 15, 20, 3, HANDLE_COLORS.end.idle, 999);
         this.updateDragHandlePosition();
-
-        this.scene.add(this.dragHandle);
     }
 
     /**
      * Create draggable handle at elbow joint
      */
     createElbowDragHandle() {
-        const geometry = new THREE.SphereGeometry(12, 32, 32);
-        geometry.computeBoundingSphere();
-
-        const material = new THREE.MeshBasicMaterial({
-            color: 0x8888ff,  // Blue-ish to distinguish from end effector
-            transparent: true,
-            opacity: 0.7,
-            depthTest: false
-        });
-
-        this.elbowDragHandle = new THREE.Mesh(geometry, material);
-        this.elbowDragHandle.name = 'elbowDragHandle';
-        this.elbowDragHandle.renderOrder = 998;
-
-        // Add outer ring
-        const ringGeometry = new THREE.TorusGeometry(16, 2.5, 16, 32);
-        ringGeometry.computeBoundingSphere();
-        const ringMaterial = new THREE.MeshBasicMaterial({
-            color: 0x8888ff,
-            transparent: true,
-            opacity: 0.9,
-            depthTest: false
-        });
-        const ring = new THREE.Mesh(ringGeometry, ringMaterial);
-        ring.renderOrder = 998;
-        this.elbowDragHandle.add(ring);
-
-        // Position at elbow
+        this.elbowDragHandle = this.createHandle('elbowDragHandle', 12, 16, 2.5, HANDLE_COLORS.elbow.idle, 998);
         this.updateElbowDragHandlePosition();
+    }
 
-        this.scene.add(this.elbowDragHandle);
+    /**
+     * Color a handle (sphere and ring) for an interaction state
+     * @param {string} which - 'end' or 'elbow'
+     * @param {string} state - 'idle', 'hover', 'dragging' or 'limit'
+     */
+    setHandleState(which, state) {
+        const handle = which === 'elbow' ? this.elbowDragHandle : this.dragHandle;
+        if (!handle) return;
+
+        const color = state === 'dragging' || state === 'limit'
+            ? HANDLE_COLORS[state]
+            : HANDLE_COLORS[which][state];
+        const opacity = state === 'idle' ? 0.7 : 0.9;
+
+        handle.material.color.setHex(color);
+        handle.material.opacity = opacity;
+        handle.children.forEach(child => {
+            child.material.color.setHex(color);
+        });
     }
 
     /**
@@ -649,11 +626,8 @@ class RobotArmController {
     updateElbowDragHandlePosition() {
         if (!this.elbowDragHandle || !this.joint3Pivot) return;
 
-        // Get the world position of joint3Pivot (elbow)
-        const worldPos = new THREE.Vector3();
-        this.joint3Pivot.getWorldPosition(worldPos);
-
-        this.elbowDragHandle.position.copy(worldPos);
+        // The elbow handle sits on joint3Pivot (elbow)
+        this.joint3Pivot.getWorldPosition(this.elbowDragHandle.position);
     }
 
     /**
@@ -661,22 +635,13 @@ class RobotArmController {
      * This ensures the handle is always at the correct kinematic end effector position
      */
     updateDragHandlePosition() {
-        if (!this.dragHandle || !this.endEffectorMesh) return;
+        if (!this.dragHandle || !this.joint3Pivot) return;
 
-        // Get the world position of the cone mesh center
-        const worldPos = new THREE.Vector3();
-        this.endEffectorMesh.getWorldPosition(worldPos);
-
-        // The cone tip is 10 units along the mesh's local X axis (after z-rotation)
-        // Transform this offset by the cone's world rotation to get actual tip position
-        const tipOffset = new THREE.Vector3(10, 0, 0);
-        const worldQuat = new THREE.Quaternion();
-        this.endEffectorMesh.getWorldQuaternion(worldQuat);
-        tipOffset.applyQuaternion(worldQuat);
-
-        // Position drag handle exactly at the visual cone tip
-        worldPos.add(tipOffset);
-        this.dragHandle.position.copy(worldPos);
+        // The kinematic end effector (and the cone tip) is L3 along the forearm
+        // from the elbow. Refresh the world matrices first: the joints may have just rotated.
+        this.joint3Pivot.updateWorldMatrix(true, false);
+        this.dragHandle.position.set(this.kinematics.L3, 0, 0);
+        this.joint3Pivot.localToWorld(this.dragHandle.position);
 
         // Also update elbow handle
         this.updateElbowDragHandlePosition();
@@ -711,6 +676,7 @@ class RobotArmController {
 
         // Make plane face the camera
         this.dragPlane.lookAt(this.camera.position);
+        this.dragPlane.updateMatrixWorld();
     }
 
     /**
@@ -736,10 +702,16 @@ class RobotArmController {
      * Check if click is near a specific handle (screen-space check)
      */
     isClickNearHandle(handle, threshold = 30) {
-        if (!handle) return false;
+        return this.getHandleScreenDistance(handle) < threshold;
+    }
 
-        const handleScreenPos = handle.position.clone();
-        handleScreenPos.project(this.camera);
+    /**
+     * Distance in CSS pixels between the pointer and a handle's center on screen
+     */
+    getHandleScreenDistance(handle) {
+        if (!handle) return Infinity;
+
+        const handleScreenPos = this.tmpVector.copy(handle.position).project(this.camera);
 
         const canvas = this.renderer.domElement;
         const handleX = (handleScreenPos.x + 1) / 2 * canvas.clientWidth;
@@ -747,80 +719,97 @@ class RobotArmController {
         const mouseX = (this.mouse.x + 1) / 2 * canvas.clientWidth;
         const mouseY = (-this.mouse.y + 1) / 2 * canvas.clientHeight;
 
-        const dist = Math.sqrt((handleX - mouseX) ** 2 + (handleY - mouseY) ** 2);
-        return dist < threshold;
+        return Math.sqrt((handleX - mouseX) ** 2 + (handleY - mouseY) ** 2);
+    }
+
+    /**
+     * Which handle is under the pointer ('end', 'elbow' or null)
+     *
+     * A handle counts if the ray hits it or the pointer is within `slack` pixels
+     * of its center; when both qualify (they can overlap on screen) the one whose
+     * center is closer to the pointer wins.
+     */
+    pickHandle(slack) {
+        const candidates = [
+            { which: 'end', handle: this.dragHandle, threshold: slack },
+            { which: 'elbow', handle: this.elbowDragHandle, threshold: slack * 0.85 }
+        ];
+
+        let best = null;
+        let bestDistance = Infinity;
+        for (const { which, handle, threshold } of candidates) {
+            if (!handle) continue;
+            const hit = this.raycaster.intersectObject(handle, true).length > 0;
+            const distance = this.getHandleScreenDistance(handle);
+            if ((hit || distance < threshold) && distance < bestDistance) {
+                best = which;
+                bestDistance = distance;
+            }
+        }
+        return best;
     }
 
     /**
      * Handle pointer down event (capture phase - fires BEFORE OrbitControls)
      */
     onPointerDown(event) {
+        // Primary button / single touch only
+        if (event.button !== 0 || this.isDragging) return;
+
         this.getMouseCoords(event);
         this.raycaster.setFromCamera(this.mouse, this.camera);
 
-        // Check end effector handle
-        const endEffectorHit = this.raycaster.intersectObject(this.dragHandle, true);
-        const isNearEndHandle = this.isClickNearHandle(this.dragHandle, 40);
+        // Fingers are less precise than a mouse: accept touches a bit further away
+        const clickedHandle = this.pickHandle(event.pointerType === 'touch' ? HANDLE_PICK_RADIUS_TOUCH : HANDLE_PICK_RADIUS);
+        if (!clickedHandle) return;
 
-        // Check elbow handle
-        const elbowHit = this.elbowDragHandle ?
-            this.raycaster.intersectObject(this.elbowDragHandle, true) : [];
-        const isNearElbowHandle = this.isClickNearHandle(this.elbowDragHandle, 35);
+        // CRITICAL: Stop the event from reaching OrbitControls
+        event.stopImmediatePropagation();
+        event.preventDefault();
 
-        // Determine which handle was clicked (prefer direct hit over "near")
-        let clickedHandle = null;
-        if (endEffectorHit.length > 0) {
-            clickedHandle = 'end';
-        } else if (elbowHit.length > 0) {
-            clickedHandle = 'elbow';
-        } else if (isNearEndHandle) {
-            clickedHandle = 'end';
-        } else if (isNearElbowHandle) {
-            clickedHandle = 'elbow';
+        this.isDragging = true;
+        this.activeHandle = clickedHandle;
+        this.dragPointerId = event.pointerId;
+        this.controls.enabled = false;
+
+        // Keep receiving moves (and the release) even outside the canvas
+        try {
+            this.renderer.domElement.setPointerCapture(event.pointerId);
+        } catch (err) {
+            // Not fatal: the drag still works while the pointer stays on the canvas
         }
 
-        if (clickedHandle) {
-            // CRITICAL: Stop the event from reaching OrbitControls
-            event.stopImmediatePropagation();
-            event.preventDefault();
+        // Grabbing the arm stops any preset/saved-position animation
+        if (this.ui) this.ui.cancelAnimation();
 
-            this.isDragging = true;
-            this.activeHandle = clickedHandle;
-            this.controls.enabled = false;
+        // Update drag plane based on which handle
+        this.updateDragPlane();
 
-            // Update drag plane based on which handle
-            this.updateDragPlane();
+        // Change handle color to indicate active dragging
+        this.setHandleState(clickedHandle, 'dragging');
+        this.setHandleState(clickedHandle === 'end' ? 'elbow' : 'end', 'idle');
+        this.updateStatus(clickedHandle === 'end' ? 'Arrastrando efector final...' : 'Arrastrando codo...');
 
-            // Change handle color to indicate active dragging
-            if (clickedHandle === 'end') {
-                this.dragHandle.material.color.setHex(0xffff00);
-                this.dragHandle.material.opacity = 0.9;
-                this.updateStatus('Arrastrando efector final...');
-            } else {
-                this.elbowDragHandle.material.color.setHex(0xffff00);
-                this.elbowDragHandle.material.opacity = 0.9;
-                this.updateStatus('Arrastrando codo...');
-            }
-
-            // Visual feedback
-            document.body.classList.add('dragging-active');
-            document.body.style.cursor = 'grabbing';
-            const indicator = document.getElementById('drag-indicator');
-            if (indicator) indicator.classList.add('active');
-        }
+        // Visual feedback
+        document.body.classList.add('dragging-active');
+        document.body.style.cursor = 'grabbing';
+        const indicator = document.getElementById('drag-indicator');
+        if (indicator) indicator.classList.add('active');
     }
 
     /**
      * Handle pointer move event (capture phase)
      */
     onPointerMove(event) {
-        this.getMouseCoords(event);
-        this.raycaster.setFromCamera(this.mouse, this.camera);
-
         if (this.isDragging) {
+            if (event.pointerId !== this.dragPointerId) return;
+
             // CRITICAL: Stop OrbitControls from receiving move events while dragging
             event.stopImmediatePropagation();
             event.preventDefault();
+
+            this.getMouseCoords(event);
+            this.raycaster.setFromCamera(this.mouse, this.camera);
 
             // Keep drag plane updated to current handle position
             this.updateDragPlane();
@@ -839,80 +828,71 @@ class RobotArmController {
                     this.handleElbowDrag(point);
                 }
             }
-        } else {
-            // Hover detection for both handles
-            const endHit = this.raycaster.intersectObject(this.dragHandle, true);
-            const elbowHit = this.elbowDragHandle ?
-                this.raycaster.intersectObject(this.elbowDragHandle, true) : [];
-            const isNearEnd = this.isClickNearHandle(this.dragHandle, 50);
-            const isNearElbow = this.isClickNearHandle(this.elbowDragHandle, 40);
-
-            if (endHit.length > 0 || isNearEnd) {
-                this.dragHandle.material.color.setHex(0x00ffaa);
-                this.dragHandle.material.opacity = 0.8;
-                document.body.style.cursor = 'grab';
-                this.isHoveringHandle = true;
-            } else if (elbowHit.length > 0 || isNearElbow) {
-                this.elbowDragHandle.material.color.setHex(0xaaaaff);
-                this.elbowDragHandle.material.opacity = 0.8;
-                document.body.style.cursor = 'grab';
-                this.isHoveringHandle = true;
-            } else {
-                // Reset both handles
-                this.dragHandle.material.color.setHex(0x00ff88);
-                this.dragHandle.material.opacity = 0.7;
-                if (this.elbowDragHandle) {
-                    this.elbowDragHandle.material.color.setHex(0x8888ff);
-                    this.elbowDragHandle.material.opacity = 0.7;
-                }
-                if (this.isHoveringHandle) {
-                    document.body.style.cursor = 'default';
-                    this.isHoveringHandle = false;
-                }
-            }
-            return; // Skip old hover code below
+            return;
         }
+
+        // Hover feedback is for mice and pens; touch has no hover
+        if (event.pointerType === 'touch' || event.buttons !== 0) return;
+
+        this.getMouseCoords(event);
+        this.raycaster.setFromCamera(this.mouse, this.camera);
+
+        // Same pick test as pointerdown, so a highlighted handle is always grabbable
+        const hovered = this.pickHandle(HANDLE_PICK_RADIUS);
+        this.setHandleState('end', hovered === 'end' ? 'hover' : 'idle');
+        this.setHandleState('elbow', hovered === 'elbow' ? 'hover' : 'idle');
+
+        if (hovered) {
+            document.body.style.cursor = 'grab';
+            this.isHoveringHandle = true;
+        } else if (this.isHoveringHandle) {
+            document.body.style.cursor = 'default';
+            this.isHoveringHandle = false;
+        }
+    }
+
+    /**
+     * Convert a Three.js world point to kinematics coordinates
+     * (Three.js X → kin X, Three.js Z → kin Y, Three.js Y - base height → kin Z)
+     */
+    threeToKinematics(point) {
+        return {
+            x: point.x,
+            y: point.z,
+            z: point.y - BASE_HEIGHT
+        };
     }
 
     /**
      * Handle end effector drag - full inverse kinematics
      */
     handleEndEffectorDrag(point) {
-        // Convert Three.js coords to kinematics coords
-        let kinX = point.x;
-        let kinY = point.z;
-        let kinZ = point.y - 12;  // Remove base offset
+        const target = this.threeToKinematics(point);
+        const tip = this.kinematics.forwardKinematics(this.currentAngles).position;
 
-        // Clamp position to workspace boundaries
-        const clamped = this.kinematics.clampToWorkspace(kinX, kinY, kinZ);
-        kinX = clamped.x;
-        kinY = clamped.y;
-        kinZ = clamped.z;
+        // Follow the cursor as far as the arm can go (reach, joint limits, floor)
+        const clamped = this.kinematics.clampToWorkspace(target.x, target.y, target.z, tip);
 
-        // Calculate inverse kinematics
-        const ikResult = this.kinematics.inverseKinematics(kinX, kinY, kinZ);
+        // Solution closest to the current pose, so the arm never flips while dragging
+        const ikResult = this.kinematics.inverseKinematics(clamped.x, clamped.y, clamped.z, this.currentAngles);
 
-        if (ikResult.valid) {
-            const floorCheck = this.kinematics.isConfigurationAboveFloor(ikResult.angles);
-
-            if (floorCheck.valid) {
-                this.applyAnglesFromIK(ikResult.angles);
-                this.updateUIFromAngles(ikResult.angles);
-
-                if (clamped.wasClamped) {
-                    this.dragHandle.material.color.setHex(0xff4444);
-                    this.updateStatus(`⚠ Límite: X=${kinX.toFixed(1)}, Y=${kinY.toFixed(1)}, Z=${kinZ.toFixed(1)}`);
-                } else {
-                    this.dragHandle.material.color.setHex(0x00ff00);
-                    this.updateStatus(`Pos: X=${kinX.toFixed(1)}, Y=${kinY.toFixed(1)}, Z=${kinZ.toFixed(1)}`);
-                }
-            } else {
-                this.dragHandle.material.color.setHex(0xff0000);
-                this.updateStatus(`⛔ Codo bajo suelo (Z=${floorCheck.elbowZ.toFixed(1)}mm)`);
-            }
-        } else {
+        if (!ikResult.valid) {
+            // Only possible if the current pose itself is no longer reachable
+            this.setHandleState('end', 'limit');
             this.updateStatus(`⛔ ${ikResult.error || 'Posición no válida'}`);
-            this.dragHandle.material.color.setHex(0xff0000);
+            return;
+        }
+
+        this.applyAnglesFromIK(ikResult.angles);
+        this.updateUIFromAngles(ikResult.angles);
+
+        const position = `X=${clamped.x.toFixed(1)}, Y=${clamped.y.toFixed(1)}, Z=${clamped.z.toFixed(1)}`;
+        if (clamped.wasClamped) {
+            this.setHandleState('end', 'limit');
+            this.updateStatus(`⚠ Límite del espacio de trabajo: ${position}`);
+        } else {
+            this.setHandleState('end', 'dragging');
+            this.updateStatus(`Pos: ${position}`);
         }
     }
 
@@ -921,208 +901,94 @@ class RobotArmController {
      * θ3 (elbow) remains unchanged
      */
     handleElbowDrag(point) {
-        // Convert Three.js coords to kinematics coords
-        const kinX = point.x;
-        const kinY = point.z;
-        const kinZ = point.y - 12;  // Remove base offset
-
-        // Calculate θ1 from XY direction (base rotation)
-        const theta1 = Math.atan2(kinY, kinX) * 180 / Math.PI;
-
-        // Calculate horizontal distance from base
-        const r = Math.sqrt(kinX * kinX + kinY * kinY);
-
-        // Height relative to shoulder
-        const L1 = this.kinematics.L1;
-        const L2 = this.kinematics.L2;
-        const zRel = kinZ - L1;
-
-        // θ2 is the angle to reach that point with the upper arm
-        // The elbow should be at distance L2 from shoulder
-        // Clamp r to max L2 (can't extend upper arm beyond its length)
-        const effectiveR = Math.min(r, L2);
-        const effectiveZ = zRel;
-
-        // Calculate θ2: angle of upper arm from horizontal
-        // atan2(z, r) gives the angle to the target point
-        const theta2 = Math.atan2(effectiveZ, effectiveR) * 180 / Math.PI;
-
-        // Keep current θ3
+        const target = this.threeToKinematics(point);
+        const kin = this.kinematics;
+        const limits = kin.jointLimits.theta2;
         const theta3 = this.currentAngles[2];
 
-        // Check if configuration is valid
-        const newAngles = [theta1, theta2, theta3];
-        const floorCheck = this.kinematics.isConfigurationAboveFloor(newAngles);
+        // Point the upper arm at the cursor: base toward it, shoulder at its elevation.
+        // Straight above/below the base the direction is undefined, so keep θ1.
+        const r = Math.sqrt(target.x * target.x + target.y * target.y);
+        const theta1 = r > 1e-6 ? kin.radToDeg(Math.atan2(target.y, target.x)) : this.currentAngles[0];
+        const desiredTheta2 = kin.radToDeg(Math.atan2(target.z - kin.L1, r));
 
-        if (floorCheck.valid) {
-            // Apply angles
-            this.setJointAngle(0, theta1, true);  // Skip validation (we already checked)
-            this.setJointAngle(1, theta2, true);
-            this.updateUIFromAngles([theta1, theta2, theta3]);
+        let theta2 = Math.min(limits.max, Math.max(limits.min, desiredTheta2));
+        let limited = theta2 !== desiredTheta2;
 
-            this.elbowDragHandle.material.color.setHex(0x00ff00);
-            this.updateStatus(`Codo: θ₁=${theta1.toFixed(1)}°, θ₂=${theta2.toFixed(1)}°`);
-        } else {
-            this.elbowDragHandle.material.color.setHex(0xff0000);
-            this.updateStatus(`⛔ Codo bajo suelo (Z=${floorCheck.elbowZ.toFixed(1)}mm)`);
+        if (!kin.isConfigurationValid([theta1, theta2, theta3])) {
+            // Too low: raising the shoulder lifts the whole arm, so find the lowest
+            // shoulder angle that keeps it above the floor
+            if (!kin.isConfigurationValid([theta1, limits.max, theta3])) {
+                this.setHandleState('elbow', 'limit');
+                this.updateStatus('⛔ Posición del codo no válida');
+                return;
+            }
+            let low = theta2;
+            let high = limits.max;
+            for (let i = 0; i < 30; i++) {
+                const mid = (low + high) / 2;
+                if (kin.isConfigurationValid([theta1, mid, theta3])) high = mid;
+                else low = mid;
+            }
+            theta2 = high;
+            limited = true;
         }
+
+        const angles = [theta1, theta2, theta3];
+        this.setJointAngles(angles, { validate: false });
+        this.updateUIFromAngles(angles);
+
+        this.setHandleState('elbow', limited ? 'limit' : 'dragging');
+        this.updateStatus(`${limited ? '⚠ Límite: ' : 'Codo: '}θ₁=${theta1.toFixed(1)}°, θ₂=${theta2.toFixed(1)}°`);
     }
 
     /**
-     * Handle pointer up event (capture phase)
+     * Handle pointer up / cancel (capture phase)
      */
     onPointerUp(event) {
-        if (this.isDragging) {
-            // Stop OrbitControls from seeing this event
-            event.stopImmediatePropagation();
-            event.preventDefault();
+        if (!this.isDragging || event.pointerId !== this.dragPointerId) return;
 
-            this.isDragging = false;
-            this.isHoveringHandle = false;
-            this.activeHandle = null;
+        // Stop OrbitControls from seeing this event
+        event.stopImmediatePropagation();
+        event.preventDefault();
 
-            // Re-enable orbit controls
-            this.controls.enabled = true;
-
-            // Reset both handle colors
-            this.dragHandle.material.color.setHex(0x00ff88);
-            this.dragHandle.material.opacity = 0.7;
-            if (this.elbowDragHandle) {
-                this.elbowDragHandle.material.color.setHex(0x8888ff);
-                this.elbowDragHandle.material.opacity = 0.7;
+        try {
+            if (this.renderer.domElement.hasPointerCapture(event.pointerId)) {
+                this.renderer.domElement.releasePointerCapture(event.pointerId);
             }
-
-            // Remove visual feedback
-            document.body.classList.remove('dragging-active');
-            document.body.style.cursor = 'default';
-            const indicator = document.getElementById('drag-indicator');
-            if (indicator) indicator.classList.remove('active');
-
-            // Show final position
-            const fk = this.kinematics.forwardKinematics(this.currentAngles);
-            this.updateStatus(`Posición: X=${fk.position.x.toFixed(1)}, Y=${fk.position.y.toFixed(1)}, Z=${fk.position.z.toFixed(1)} mm`);
+        } catch (err) {
+            // Capture may already be gone
         }
-    }
 
-    /**
-     * Handle touch start event
-     */
-    onTouchStart(event) {
-        if (event.touches.length === 1) {
-            const touch = event.touches[0];
-            this.getMouseCoords(touch);
-            this.raycaster.setFromCamera(this.mouse, this.camera);
+        this.isDragging = false;
+        this.isHoveringHandle = false;
+        this.activeHandle = null;
+        this.dragPointerId = null;
 
-            const intersects = this.raycaster.intersectObject(this.dragHandle, true);
-            const isNearHandle = this.isClickNearDragHandle(50);
+        // Re-enable orbit controls
+        this.controls.enabled = true;
 
-            if (intersects.length > 0 || isNearHandle) {
-                event.stopImmediatePropagation();
-                event.preventDefault();
-                this.isDragging = true;
-                this.controls.enabled = false;
-                this.updateDragPlane();
-                this.dragHandle.material.color.setHex(0xffff00);
-            }
-        }
-    }
+        // Reset both handle colors
+        this.setHandleState('end', 'idle');
+        this.setHandleState('elbow', 'idle');
 
-    /**
-     * Handle touch move event
-     */
-    onTouchMove(event) {
-        if (this.isDragging && event.touches.length === 1) {
-            event.preventDefault();
+        // Remove visual feedback
+        document.body.classList.remove('dragging-active');
+        document.body.style.cursor = 'default';
+        const indicator = document.getElementById('drag-indicator');
+        if (indicator) indicator.classList.remove('active');
 
-            const touch = event.touches[0];
-            this.getMouseCoords(touch);
-            this.raycaster.setFromCamera(this.mouse, this.camera);
-
-            // Keep drag plane at current handle position
-            this.updateDragPlane();
-
-            const intersects = this.raycaster.intersectObject(this.dragPlane);
-
-            if (intersects.length > 0) {
-                const point = intersects[0].point;
-
-                let kinX = point.x;
-                let kinY = point.z;
-                let kinZ = point.y - 12;
-
-                // Clamp position to workspace boundaries
-                const clamped = this.kinematics.clampToWorkspace(kinX, kinY, kinZ);
-                kinX = clamped.x;
-                kinY = clamped.y;
-                kinZ = clamped.z;
-
-                const ikResult = this.kinematics.inverseKinematics(kinX, kinY, kinZ);
-
-                if (ikResult.valid) {
-                    // Check if configuration keeps all arm parts above floor
-                    const floorCheck = this.kinematics.isConfigurationAboveFloor(ikResult.angles);
-
-                    if (floorCheck.valid) {
-                        this.applyAnglesFromIK(ikResult.angles);
-                        this.updateUIFromAngles(ikResult.angles);
-
-                        if (clamped.wasClamped) {
-                            this.dragHandle.material.color.setHex(0xff4444);  // Red: at boundary
-                        } else {
-                            this.dragHandle.material.color.setHex(0x00ff00);  // Green: normal
-                        }
-                    } else {
-                        // Configuration would put arm below floor
-                        this.dragHandle.material.color.setHex(0xff0000);  // Bright red
-                    }
-                }
-            }
-        }
-    }
-
-    /**
-     * Handle touch end event
-     */
-    onTouchEnd(event) {
-        if (this.isDragging) {
-            this.isDragging = false;
-            this.isHoveringHandle = false;
-            this.controls.enabled = true;
-            this.dragHandle.material.color.setHex(0x00ff88);
-            this.dragHandle.material.opacity = 0.7;
-        }
+        // Show final position
+        const fk = this.kinematics.forwardKinematics(this.currentAngles);
+        this.updateStatus(`Posición: X=${fk.position.x.toFixed(1)}, Y=${fk.position.y.toFixed(1)}, Z=${fk.position.z.toFixed(1)} mm`);
     }
 
     /**
      * Apply angles from IK calculation (without updating UI)
      */
     applyAnglesFromIK(angles) {
-        // Update internal state and 3D model
-        for (let i = 0; i < 3; i++) {
-            this.currentAngles[i] = angles[i];
-            const angleRad = angles[i] * Math.PI / 180;
-
-            switch (i) {
-                case 0:
-                    // Negate: Three.js Y+ rotation is toward -Z, but kinematics θ1+ is toward +kinY = +threeZ
-                    this.joint1Pivot.rotation.y = -angleRad;
-                    break;
-                case 1:
-                    this.joint2Pivot.rotation.z = angleRad;
-                    break;
-                case 2:
-                    this.joint3Pivot.rotation.z = angleRad;
-                    break;
-            }
-        }
-
-        // Update drag handle position
-        this.updateDragHandlePosition();
-
-        // Update trajectory if enabled
-        if (this.showTrajectory) {
-            this.addTrajectoryPoint();
-        }
+        // IK results are validated by the caller
+        this.setJointAngles(angles, { validate: false });
     }
 
     /**
@@ -1155,43 +1021,50 @@ class RobotArmController {
      * @returns {boolean} True if angle was applied, false if blocked
      */
     setJointAngle(jointIndex, angleDegrees, skipValidation = false) {
-        // Store previous angle in case we need to revert
-        const previousAngle = this.currentAngles[jointIndex];
+        const angles = this.getCurrentAngles();
+        angles[jointIndex] = angleDegrees;
+        return this.setJointAngles(angles, { validate: !skipValidation });
+    }
 
-        // Temporarily set the new angle to test configuration
-        this.currentAngles[jointIndex] = angleDegrees;
-
-        // Check if this configuration keeps arm above floor (unless skipping validation)
-        if (!skipValidation && this.kinematics) {
-            const floorCheck = this.kinematics.isConfigurationAboveFloor(this.currentAngles);
+    /**
+     * Set all three joint angles at once
+     *
+     * The whole configuration is validated together, so moving several joints
+     * never gets rejected because of an intermediate one-joint-changed state.
+     *
+     * @param {Array} angles - [θ1, θ2, θ3] in degrees
+     * @param {Object} options
+     * @param {boolean} [options.validate=true] - Reject configurations outside joint limits or below the floor
+     * @returns {boolean} True if the angles were applied, false if blocked
+     */
+    setJointAngles(angles, { validate = true } = {}) {
+        if (validate && this.kinematics) {
+            if (!this.kinematics.isWithinLimits(angles[0], angles[1], angles[2])) {
+                this.updateStatus('⛔ Fuera de los límites articulares');
+                return false;
+            }
+            const floorCheck = this.kinematics.isConfigurationAboveFloor(angles);
             if (!floorCheck.valid) {
-                // Revert to previous angle - configuration would put arm below floor
-                this.currentAngles[jointIndex] = previousAngle;
-                this.updateStatus(`⛔ Configuración inválida: codo en Z=${floorCheck.elbowZ.toFixed(1)}mm`);
+                const part = floorCheck.elbowZ < 0 ? 'codo' : 'efector';
+                const z = Math.min(floorCheck.elbowZ, floorCheck.endEffectorZ);
+                this.updateStatus(`⛔ Configuración inválida: ${part} en Z=${z.toFixed(1)}mm`);
                 return false;
             }
         }
 
-        // Apply the angle to the 3D model
-        const angleRad = angleDegrees * Math.PI / 180;
-
-        switch (jointIndex) {
-            case 0:
-                // θ1: Base rotation around Y axis
-                // Negate: Three.js Y+ rotation is toward -Z, but kinematics θ1+ is toward +kinY = +threeZ
-                this.joint1Pivot.rotation.y = -angleRad;
-                break;
-            case 1:
-                // θ2: Shoulder pitch - rotation around Z axis in local frame
-                // Positive θ2 = arm goes UP
-                this.joint2Pivot.rotation.z = angleRad;
-                break;
-            case 2:
-                // θ3: Elbow pitch - rotation around Z axis in local frame
-                // Positive θ3 = forearm folds UP relative to upper arm
-                this.joint3Pivot.rotation.z = angleRad;
-                break;
+        this.currentAngles = [angles[0], angles[1], angles[2]];
+        if (this.kinematics) {
+            // IK picks the solution closest to the robot's actual configuration
+            this.kinematics.currentAngles = [...this.currentAngles];
         }
+
+        // θ1: Base rotation around Y axis
+        // Negate: Three.js Y+ rotation is toward -Z, but kinematics θ1+ is toward +kinY = +threeZ
+        this.joint1Pivot.rotation.y = -angles[0] * Math.PI / 180;
+        // θ2: Shoulder pitch around Z in local frame (positive = arm goes UP)
+        this.joint2Pivot.rotation.z = angles[1] * Math.PI / 180;
+        // θ3: Elbow pitch around Z in local frame (positive = forearm folds UP)
+        this.joint3Pivot.rotation.z = angles[2] * Math.PI / 180;
 
         // Update drag handle position
         this.updateDragHandlePosition();
@@ -1222,29 +1095,26 @@ class RobotArmController {
         // Three.js: X=right, Y=up, Z=forward
         // Our mapping: kinX->threeX, kinY->threeZ, kinZ->threeY
         const threeX = fk.position.x;
-        const threeY = fk.position.z + 12;  // Add base height offset
+        const threeY = fk.position.z + BASE_HEIGHT;  // Add base height offset
         const threeZ = fk.position.y;
 
-        this.trajectoryPoints.push(new THREE.Vector3(threeX, threeY, threeZ));
+        const geometry = this.trajectoryLine.geometry;
+        const attribute = geometry.attributes.position;
+        const positions = attribute.array;
 
-        // Limit points
-        if (this.trajectoryPoints.length > 500) {
-            this.trajectoryPoints.shift();
+        // Limit points: drop the oldest
+        if (this.trajectoryCount === MAX_TRAJECTORY_POINTS) {
+            positions.copyWithin(0, 3);
+            this.trajectoryCount--;
         }
 
-        // Update line geometry
-        const positions = new Float32Array(this.trajectoryPoints.length * 3);
-        this.trajectoryPoints.forEach((p, i) => {
-            positions[i * 3] = p.x;
-            positions[i * 3 + 1] = p.y;
-            positions[i * 3 + 2] = p.z;
-        });
+        positions[this.trajectoryCount * 3] = threeX;
+        positions[this.trajectoryCount * 3 + 1] = threeY;
+        positions[this.trajectoryCount * 3 + 2] = threeZ;
+        this.trajectoryCount++;
 
-        this.trajectoryLine.geometry.setAttribute(
-            'position',
-            new THREE.BufferAttribute(positions, 3)
-        );
-        this.trajectoryLine.geometry.attributes.position.needsUpdate = true;
+        geometry.setDrawRange(0, this.trajectoryCount);
+        attribute.needsUpdate = true;
     }
 
     /**
@@ -1253,7 +1123,7 @@ class RobotArmController {
     showTargetMarker(x, y, z) {
         // Convert kinematics coords to Three.js coords
         const threeX = x;
-        const threeY = z + 12;  // Base height offset
+        const threeY = z + BASE_HEIGHT;  // Base height offset
         const threeZ = y;
 
         this.targetMarker.position.set(threeX, threeY, threeZ);
@@ -1305,6 +1175,9 @@ class RobotArmController {
                 break;
         }
 
+        // Same framing on narrow screens as at startup
+        endPos.sub(endTarget).multiplyScalar(this.viewDistanceFactor()).add(endTarget);
+
         const startTime = performance.now();
 
         const animateCamera = (time) => {
@@ -1340,26 +1213,52 @@ class RobotArmController {
         this.trajectoryLine.visible = show;
 
         if (!show) {
-            this.trajectoryPoints = [];
+            this.clearTrajectory();
         }
+    }
+
+    /**
+     * Forget the drawn trajectory
+     */
+    clearTrajectory() {
+        this.trajectoryCount = 0;
+        this.trajectoryLine.geometry.setDrawRange(0, 0);
     }
 
     /**
      * Update robot geometry based on new parameters
      */
     updateRobotGeometry() {
-        // Rebuild robot with new dimensions
+        // Rebuild robot with new dimensions, freeing the old meshes' GPU memory
         if (this.robotGroup) {
             this.scene.remove(this.robotGroup);
+            this.disposeObject(this.robotGroup);
         }
         this.createRobotModel();
 
-        // Reapply current angles
-        this.setJointAngle(0, this.currentAngles[0]);
-        this.setJointAngle(1, this.currentAngles[1]);
-        this.setJointAngle(2, this.currentAngles[2]);
+        // The old path was drawn with the old link lengths
+        this.clearTrajectory();
 
-        this.updateStatus('Geometría actualizada');
+        // Keep the pose if it is still valid with the new lengths, otherwise go Home
+        // (always valid: the whole arm is at shoulder height)
+        const poseKept = this.kinematics.isConfigurationValid(this.currentAngles);
+        this.setJointAngles(poseKept ? this.getCurrentAngles() : [0, 0, 0], { validate: false });
+        if (this.ui) this.ui.syncControlsFromRobot();
+
+        this.updateStatus(poseKept ? 'Geometría actualizada' : 'Geometría actualizada · brazo movido a Home');
+        return poseKept;
+    }
+
+    /**
+     * Free the GPU resources of an object tree removed from the scene
+     */
+    disposeObject(object) {
+        object.traverse(child => {
+            if (child.geometry) child.geometry.dispose();
+            if (child.material) {
+                (Array.isArray(child.material) ? child.material : [child.material]).forEach(m => m.dispose());
+            }
+        });
     }
 
     /**
@@ -1383,6 +1282,83 @@ class RobotArmController {
         this.camera.aspect = width / height;
         this.camera.updateProjectionMatrix();
         this.renderer.setSize(width, height);
+
+        this.updateAxesIndicator(true);
+    }
+
+    /**
+     * Orientation indicator (bottom-left): the kinematic X, Y, Z axes as the camera sees them
+     */
+    setupAxesIndicator() {
+        const container = document.getElementById('axes-helper');
+        if (!container) return;
+
+        this.axesCanvas = document.createElement('canvas');
+        this.axesCanvas.setAttribute('aria-hidden', 'true');
+        container.append(this.axesCanvas);
+        this.axesContext = this.axesCanvas.getContext('2d');
+        this.axesDrawnQuaternion = new THREE.Quaternion(0, 0, 0, 0);  // Forces the first draw
+        this.axesCameraInverse = new THREE.Quaternion();
+
+        // Kinematic axes in Three.js coordinates, colored like the scene's axes helper
+        this.axesIndicatorAxes = [
+            { label: 'X', direction: new THREE.Vector3(1, 0, 0), view: new THREE.Vector3(), color: '#ef4444' },
+            { label: 'Y', direction: new THREE.Vector3(0, 0, 1), view: new THREE.Vector3(), color: '#3b82f6' },
+            { label: 'Z', direction: new THREE.Vector3(0, 1, 0), view: new THREE.Vector3(), color: '#22c55e' }
+        ];
+    }
+
+    /**
+     * Redraw the orientation indicator when the camera has turned (or when forced)
+     */
+    updateAxesIndicator(force = false) {
+        if (!this.axesContext) return;
+
+        const canvas = this.axesCanvas;
+        const size = canvas.parentElement.clientWidth;
+        const ratio = Math.min(window.devicePixelRatio || 1, 2);
+        if (canvas.width !== Math.round(size * ratio)) {
+            canvas.width = canvas.height = Math.round(size * ratio);
+            canvas.style.width = canvas.style.height = `${size}px`;
+            force = true;
+        }
+        if (!force && this.camera.quaternion.equals(this.axesDrawnQuaternion)) return;
+        this.axesDrawnQuaternion.copy(this.camera.quaternion);
+
+        const ctx = this.axesContext;
+        ctx.setTransform(ratio, 0, 0, ratio, 0, 0);
+        ctx.clearRect(0, 0, size, size);
+
+        const center = size / 2;
+        const length = size * 0.3;
+        this.axesCameraInverse.copy(this.camera.quaternion).invert();
+
+        // View space: x right, y up, z toward the viewer. Draw the farthest axis first.
+        const axes = this.axesIndicatorAxes;
+        axes.forEach(axis => axis.view.copy(axis.direction).applyQuaternion(this.axesCameraInverse));
+        [...axes].sort((a, b) => a.view.z - b.view.z).forEach(axis => {
+            const x = center + axis.view.x * length;
+            const y = center - axis.view.y * length;
+
+            ctx.strokeStyle = axis.color;
+            ctx.lineWidth = 2;
+            ctx.beginPath();
+            ctx.moveTo(center, center);
+            ctx.lineTo(x, y);
+            ctx.stroke();
+
+            const labelX = center + axis.view.x * length * 1.32;
+            const labelY = center - axis.view.y * length * 1.32;
+            ctx.fillStyle = axis.color;
+            ctx.beginPath();
+            ctx.arc(labelX, labelY, Math.max(7, size * 0.08), 0, Math.PI * 2);
+            ctx.fill();
+            ctx.fillStyle = '#ffffff';
+            ctx.font = `600 ${Math.max(9, Math.round(size * 0.1))}px Roboto, sans-serif`;
+            ctx.textAlign = 'center';
+            ctx.textBaseline = 'middle';
+            ctx.fillText(axis.label, labelX, labelY + 0.5);
+        });
     }
 
     /**
@@ -1395,6 +1371,7 @@ class RobotArmController {
 
         // Update controls
         this.controls.update();
+        this.updateAxesIndicator();
 
         // Animate target marker
         if (this.targetMarker && this.targetMarker.visible) {
@@ -1423,6 +1400,21 @@ class RobotArmController {
             this.lastFPSUpdate = now;
         }
     }
+}
+
+/**
+ * Replace the loading message with an explanation when the app can't start
+ */
+function showStartupError(error) {
+    console.error('RoboArm 3D could not start:', error);
+    const loadingText = document.querySelector('.loading-text');
+    if (!loadingText) return;
+
+    const message = String(error && error.message ? error.message : error);
+    loadingText.textContent = /webgl/i.test(message)
+        ? 'Tu navegador o tarjeta gráfica no tiene WebGL disponible, necesario para la vista 3D.'
+        : `Error al iniciar: ${message}`;
+    loadingText.style.color = '#ef4444';
 }
 
 // Initialize application when DOM is ready

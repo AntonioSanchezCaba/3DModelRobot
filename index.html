@@ -4,10 +4,8 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Control de Brazo Robótico 3D | NEMA 17 Stepper Control</title>
-    <link rel="stylesheet" href="css/styles.css">
-    <link href="https://fonts.googleapis.com/css2?family=Roboto:wght@300;400;500;700&family=Roboto+Mono:wght@400;500&display=swap" rel="stylesheet">
-    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
-    <!-- Critical inline styles as fallback -->
+    <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'%3E%3Ctext y='.9em' font-size='90'%3E%F0%9F%A4%96%3C/text%3E%3C/svg%3E">
+    <!-- Critical inline styles: shown before styles.css loads (which overrides them) -->
     <style>
         * { margin: 0; padding: 0; box-sizing: border-box; }
         body { font-family: 'Roboto', sans-serif; background: #0f0f1a; color: #fff; overflow: hidden; }
@@ -26,6 +24,9 @@
         .progress-fill { height: 100%; background: linear-gradient(90deg, #6366f1, #10b981); width: 50%; animation: progress 2s ease-in-out infinite; }
         @keyframes progress { 0% { width: 0; } 50% { width: 70%; } 100% { width: 100%; } }
     </style>
+    <link rel="stylesheet" href="css/styles.css?v=1.1.0">
+    <link href="https://fonts.googleapis.com/css2?family=Roboto:wght@300;400;500;700&family=Roboto+Mono:wght@400;500&display=swap" rel="stylesheet">
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
 </head>
 <body>
     <!-- Loading Screen -->
@@ -52,14 +53,14 @@
                 <span>RoboArm <span class="highlight">3D</span></span>
             </div>
             <nav class="header-nav">
-                <button class="nav-btn active" data-view="control">
-                    <i class="fas fa-sliders-h"></i> Control
+                <button class="nav-btn active" data-view="control" title="Control" aria-label="Control">
+                    <i class="fas fa-sliders-h"></i> <span class="nav-label">Control</span>
                 </button>
-                <button class="nav-btn" data-view="kinematics">
-                    <i class="fas fa-calculator"></i> Cinemática
+                <button class="nav-btn" data-view="kinematics" title="Cinemática" aria-label="Cinemática">
+                    <i class="fas fa-calculator"></i> <span class="nav-label">Cinemática</span>
                 </button>
-                <button class="nav-btn" data-view="settings">
-                    <i class="fas fa-cog"></i> Configuración
+                <button class="nav-btn" data-view="settings" title="Configuración" aria-label="Configuración">
+                    <i class="fas fa-cog"></i> <span class="nav-label">Configuración</span>
                 </button>
             </nav>
             <div class="header-actions">
@@ -125,7 +126,7 @@
                 <!-- Drag Hint -->
                 <div class="drag-hint">
                     <i class="fas fa-hand-pointer"></i>
-                    <span>Arrastra la esfera verde para mover el efector final</span>
+                    <span>Arrastra la esfera verde (punta) o la azul (codo) para mover el brazo</span>
                 </div>
 
                 <!-- Drag Indicator -->
@@ -413,6 +414,25 @@
                                 <option value="32">1/32 Step</option>
                             </select>
                         </div>
+                        <div class="kin-result motor-steps">
+                            <p class="kin-description">Posición de cada motor en pasos desde Home (0°)</p>
+                            <div class="result-row">
+                                <span class="result-label">Motor 1 · Base (θ₁):</span>
+                                <span id="steps-joint1" class="result-value">0</span>
+                            </div>
+                            <div class="result-row">
+                                <span class="result-label">Motor 2 · Hombro (θ₂):</span>
+                                <span id="steps-joint2" class="result-value">0</span>
+                            </div>
+                            <div class="result-row">
+                                <span class="result-label">Motor 3 · Codo (θ₃):</span>
+                                <span id="steps-joint3" class="result-value">0</span>
+                            </div>
+                            <div class="result-row">
+                                <span class="result-label">Resolución:</span>
+                                <span id="steps-resolution" class="result-value">--</span>
+                            </div>
+                        </div>
                         <div class="setting-item">
                             <label>Velocidad de animación</label>
                             <input type="range" id="anim-speed" min="0.1" max="2" value="1" step="0.1">
@@ -455,9 +475,19 @@
                 </section>
 
                 <!-- Presets Section -->
-                <section class="panel-section-mini">
+                <section class="panel-section-mini" id="section-positions">
                     <div class="section-header mini">
                         <h2><i class="fas fa-bookmark"></i> Posiciones Guardadas</h2>
+                        <div class="section-tools">
+                            <span class="section-badge" id="saved-positions-count" title="Posiciones guardadas">0</span>
+                            <button type="button" class="icon-btn" id="btn-import-positions" title="Importar posiciones (JSON)" aria-label="Importar posiciones">
+                                <i class="fas fa-file-import"></i>
+                            </button>
+                            <button type="button" class="icon-btn" id="btn-export-positions" title="Exportar posiciones (JSON)" aria-label="Exportar posiciones">
+                                <i class="fas fa-file-export"></i>
+                            </button>
+                            <input type="file" id="import-positions-file" accept=".json,application/json" hidden>
+                        </div>
                     </div>
                     <div class="presets-grid">
                         <button class="preset-btn" data-preset="home" title="Posición inicial">
@@ -472,11 +502,15 @@
                             <i class="fas fa-hand-paper"></i>
                             <span>Place</span>
                         </button>
-                        <button class="preset-btn" data-preset="custom" title="Guardar posición actual">
+                        <button class="preset-btn save" data-preset="custom" id="btn-save-position" title="Guardar la posición actual con un nombre">
                             <i class="fas fa-plus"></i>
                             <span>Guardar</span>
                         </button>
                     </div>
+                    <ul class="saved-positions" id="saved-positions-list" aria-label="Posiciones guardadas"></ul>
+                    <p class="saved-positions-empty" id="saved-positions-empty">
+                        Aún no hay posiciones guardadas. Mueve el brazo y pulsa <strong>Guardar</strong> para añadir la posición actual con un nombre.
+                    </p>
                 </section>
             </aside>
         </main>
@@ -505,6 +539,26 @@
         </footer>
     </div>
 
+    <!-- Dialog (save / rename / delete positions) -->
+    <div id="dialog-backdrop" class="dialog-backdrop" hidden>
+        <div class="dialog" role="dialog" aria-modal="true" aria-labelledby="dialog-title">
+            <h3 id="dialog-title" class="dialog-title"></h3>
+            <p id="dialog-message" class="dialog-message"></p>
+            <form id="dialog-form" class="dialog-form" novalidate>
+                <div id="dialog-input-group" class="dialog-input-group">
+                    <label for="dialog-input" id="dialog-input-label" class="dialog-label">Nombre</label>
+                    <input type="text" id="dialog-input" class="dialog-input" autocomplete="off" spellcheck="false">
+                    <div id="dialog-hint" class="dialog-hint" aria-live="polite"></div>
+                </div>
+                <div id="dialog-preview" class="dialog-preview"></div>
+                <div class="dialog-actions">
+                    <button type="button" id="dialog-cancel" class="secondary-btn">Cancelar</button>
+                    <button type="submit" id="dialog-confirm" class="primary-btn">Guardar</button>
+                </div>
+            </form>
+        </div>
+    </div>
+
     <!-- Toast Notifications -->
     <div id="toast-container"></div>
 
@@ -528,9 +582,9 @@
         }
     </script>
     <script src="https://cdn.jsdelivr.net/npm/three@0.128.0/examples/js/controls/OrbitControls.min.js"></script>
-    <script src="https://cdn.jsdelivr.net/npm/three@0.128.0/examples/js/loaders/STLLoader.min.js"></script>
-    <script src="js/kinematics.js"></script>
-    <script src="js/ui.js"></script>
-    <script src="js/main.js"></script>
+    <script src="js/kinematics.js?v=1.1.0"></script>
+    <script src="js/positions.js?v=1.1.0"></script>
+    <script src="js/ui.js?v=1.1.0"></script>
+    <script src="js/main.js?v=1.1.0"></script>
 </body>
 </html>

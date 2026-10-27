@@ -58,6 +58,10 @@ class RobotKinematics {
      * Update robot link lengths
      */
     updateLinkLengths(L1, L2, L3) {
+        const lengths = [L1, L2, L3];
+        if (!lengths.every(L => Number.isFinite(L) && L > 0)) {
+            throw new Error('Las longitudes deben ser números mayores que 0');
+        }
         this.L1 = L1;
         this.L2 = L2;
         this.L3 = L3;
@@ -80,9 +84,6 @@ class RobotKinematics {
         const theta1 = this.degToRad(angles[0]);
         const theta2 = this.degToRad(angles[1]);
         const theta3 = this.degToRad(angles[2]);
-
-        // Store current angles
-        this.currentAngles = [...angles];
 
         // Calculate positions using geometric approach
         // Shoulder position (fixed relative to base rotation)
@@ -131,12 +132,18 @@ class RobotKinematics {
      * Inverse Kinematics - Calculate joint angles from target position
      * Uses geometric approach for 3-DOF arm
      *
+     * Up to four solutions exist: the arm can lean toward the target (front) or
+     * reach back over the base (back, θ1 + 180°), each with elbow up or down.
+     * Solutions outside the joint limits or below the floor are discarded, and the
+     * one closest to the reference configuration is returned.
+     *
      * @param {number} x - Target X position (mm)
      * @param {number} y - Target Y position (mm)
      * @param {number} z - Target Z position (mm)
+     * @param {Array} [referenceAngles] - Configuration to stay close to (defaults to currentAngles)
      * @returns {Object} Result with angles and validity status
      */
-    inverseKinematics(x, y, z) {
+    inverseKinematics(x, y, z, referenceAngles = this.currentAngles) {
         const result = {
             valid: false,
             angles: [0, 0, 0],
@@ -144,140 +151,160 @@ class RobotKinematics {
             solutions: []
         };
 
-        try {
-            // Handle special case: target at origin XY plane
-            if (Math.abs(x) < 0.001 && Math.abs(y) < 0.001) {
-                // Target is on Z axis, theta1 is undefined - use current value
-                result.error = "Objetivo en el eje Z - θ₁ indefinido";
-                return result;
-            }
-
-            // Joint 1: Base rotation
-            // theta1 = atan2(y, x)
-            const theta1 = Math.atan2(y, x);
-
-            // Calculate the position in the arm plane (after theta1 rotation)
-            // r is the horizontal distance from the shoulder
-            const r = Math.sqrt(x * x + y * y);
-
-            // Height relative to shoulder
-            const zRel = z - this.L1;
-
-            // Distance from shoulder to target in the arm plane
-            const D = Math.sqrt(r * r + zRel * zRel);
-
-            // Check reachability
-            const maxReach = this.L2 + this.L3;
-            const minReach = Math.abs(this.L2 - this.L3);
-
-            if (D > maxReach) {
-                result.error = `Fuera de alcance. Distancia: ${D.toFixed(1)}mm > Max: ${maxReach.toFixed(1)}mm`;
-                return result;
-            }
-
-            if (D < minReach) {
-                result.error = `Muy cercano. Distancia: ${D.toFixed(1)}mm < Min: ${minReach.toFixed(1)}mm`;
-                return result;
-            }
-
-            // Law of cosines to find elbow angle (theta3)
-            // D² = L2² + L3² + 2·L2·L3·cos(θ3)  (note: +2 because θ3=0 means straight)
-            // Rearranging: cos(θ3) = (D² - L2² - L3²) / (2·L2·L3)
-            const cosTheta3 = (D * D - this.L2 * this.L2 - this.L3 * this.L3) /
-                             (2 * this.L2 * this.L3);
-
-            // Clamp to valid range due to floating point errors
-            const cosTheta3Clamped = Math.max(-1, Math.min(1, cosTheta3));
-
-            // Two solutions: elbow up (negative θ3) and elbow down (positive θ3)
-            const theta3_elbowDown = Math.acos(cosTheta3Clamped);
-            const theta3_elbowUp = -theta3_elbowDown;
-
-            // Calculate theta2 for each solution
-            // Using the angle to the target and the internal angle of the arm triangle
-            const phi = Math.atan2(zRel, r);  // Angle from horizontal to target
-
-            // For elbow down configuration
-            const psi1 = Math.atan2(
-                this.L3 * Math.sin(theta3_elbowDown),
-                this.L2 + this.L3 * Math.cos(theta3_elbowDown)
-            );
-            const theta2_elbowDown = phi - psi1;
-
-            // For elbow up configuration
-            const psi2 = Math.atan2(
-                this.L3 * Math.sin(theta3_elbowUp),
-                this.L2 + this.L3 * Math.cos(theta3_elbowUp)
-            );
-            const theta2_elbowUp = phi - psi2;
-
-            // Convert to degrees
-            const solutions = [
-                {
-                    theta1: this.radToDeg(theta1),
-                    theta2: this.radToDeg(theta2_elbowDown),
-                    theta3: this.radToDeg(theta3_elbowDown),
-                    config: 'elbow_down'
-                },
-                {
-                    theta1: this.radToDeg(theta1),
-                    theta2: this.radToDeg(theta2_elbowUp),
-                    theta3: this.radToDeg(theta3_elbowUp),
-                    config: 'elbow_up'
-                }
-            ];
-
-            // Filter solutions by joint limits
-            const validSolutions = solutions.filter(sol => {
-                return this.isWithinLimits(sol.theta1, sol.theta2, sol.theta3);
-            });
-
-            if (validSolutions.length === 0) {
-                result.error = "Sin soluciones dentro de límites articulares";
-                return result;
-            }
-
-            // Select best solution (closest to current configuration)
-            let bestSolution = validSolutions[0];
-
-            if (validSolutions.length > 1) {
-                let minDist = Infinity;
-                for (const sol of validSolutions) {
-                    const dist = Math.sqrt(
-                        Math.pow(sol.theta1 - this.currentAngles[0], 2) +
-                        Math.pow(sol.theta2 - this.currentAngles[1], 2) +
-                        Math.pow(sol.theta3 - this.currentAngles[2], 2)
-                    );
-                    if (dist < minDist) {
-                        minDist = dist;
-                        bestSolution = sol;
-                    }
-                }
-            }
-
-            result.valid = true;
-            result.angles = [bestSolution.theta1, bestSolution.theta2, bestSolution.theta3];
-            result.solutions = validSolutions;
-            result.configuration = bestSolution.config;
-
-        } catch (err) {
-            result.error = `Error en cálculo: ${err.message}`;
+        if (![x, y, z].every(Number.isFinite)) {
+            result.error = 'Coordenadas inválidas';
+            return result;
         }
 
+        const reference = Array.isArray(referenceAngles) && referenceAngles.every(Number.isFinite)
+            ? referenceAngles
+            : [0, 0, 0];
+
+        // r is the horizontal distance from the base axis
+        const r = Math.sqrt(x * x + y * y);
+
+        // Height relative to shoulder
+        const zRel = z - this.L1;
+
+        // Distance from shoulder to target in the arm plane
+        const D = Math.sqrt(r * r + zRel * zRel);
+
+        // Check reachability
+        const maxReach = this.L2 + this.L3;
+        const minReach = this.getMinReach();
+
+        if (D > maxReach + 1e-9) {
+            result.error = `Fuera de alcance. Distancia: ${D.toFixed(1)}mm > Max: ${maxReach.toFixed(1)}mm`;
+            return result;
+        }
+
+        if (D < minReach - 1e-9) {
+            result.error = `Muy cercano. Distancia: ${D.toFixed(1)}mm < Min: ${minReach.toFixed(1)}mm`;
+            return result;
+        }
+
+        // Law of cosines to find elbow angle (theta3)
+        // D² = L2² + L3² + 2·L2·L3·cos(θ3)  (note: +2 because θ3=0 means straight)
+        // Rearranging: cos(θ3) = (D² - L2² - L3²) / (2·L2·L3)
+        const cosTheta3 = (D * D - this.L2 * this.L2 - this.L3 * this.L3) /
+                         (2 * this.L2 * this.L3);
+
+        // Clamp to valid range due to floating point errors
+        const theta3Abs = Math.acos(Math.max(-1, Math.min(1, cosTheta3)));
+
+        // Joint 1: Base rotation. On the Z axis θ1 is free: keep the reference value.
+        const theta1Front = r < 1e-9 ? this.degToRad(reference[0]) : Math.atan2(y, x);
+
+        const candidates = [];
+        for (const side of ['front', 'back']) {
+            // Reaching back flips the base by 180° and mirrors the target in the arm plane
+            const theta1 = side === 'front' ? theta1Front : theta1Front + Math.PI;
+            const planarX = side === 'front' ? r : -r;
+            const phi = Math.atan2(zRel, planarX);  // Angle from horizontal to target
+
+            // Elbow down: positive θ3, elbow up: negative θ3
+            for (const [elbow, theta3] of [['elbow_down', theta3Abs], ['elbow_up', -theta3Abs]]) {
+                const psi = Math.atan2(
+                    this.L3 * Math.sin(theta3),
+                    this.L2 + this.L3 * Math.cos(theta3)
+                );
+                candidates.push({
+                    theta1: this.normalizeAngle(this.radToDeg(theta1)),
+                    theta2: this.normalizeAngle(this.radToDeg(phi - psi)),
+                    theta3: this.radToDeg(theta3),
+                    config: side === 'front' ? elbow : `${elbow}_back`
+                });
+            }
+        }
+
+        // Fully extended / fully folded: elbow up and down coincide
+        const solutions = candidates.filter((sol, i) => !candidates.slice(0, i).some(other =>
+            Math.abs(other.theta1 - sol.theta1) < 1e-9 &&
+            Math.abs(other.theta2 - sol.theta2) < 1e-9 &&
+            Math.abs(other.theta3 - sol.theta3) < 1e-9));
+
+        // Filter solutions by joint limits
+        const withinLimits = solutions.filter(sol => this.isWithinLimits(sol.theta1, sol.theta2, sol.theta3));
+        if (withinLimits.length === 0) {
+            result.error = "Sin soluciones dentro de límites articulares";
+            return result;
+        }
+
+        // ...and by the floor: no part of the arm may go below Z = 0
+        const validSolutions = withinLimits.filter(sol =>
+            this.isConfigurationAboveFloor([sol.theta1, sol.theta2, sol.theta3]).valid);
+        if (validSolutions.length === 0) {
+            result.error = "Todas las soluciones dejan el brazo bajo el suelo";
+            return result;
+        }
+
+        // Select best solution (closest to reference configuration). The base can't
+        // wrap past ±180°, so plain differences are the real joint travel.
+        let bestSolution = validSolutions[0];
+        let minDist = Infinity;
+        for (const sol of validSolutions) {
+            const dist = Math.hypot(
+                sol.theta1 - reference[0],
+                sol.theta2 - reference[1],
+                sol.theta3 - reference[2]
+            );
+            if (dist < minDist) {
+                minDist = dist;
+                bestSolution = sol;
+            }
+        }
+
+        const limits = this.jointLimits;
+        const clampToLimit = (value, limit) => Math.min(limit.max, Math.max(limit.min, value));
+
+        result.valid = true;
+        result.angles = [
+            clampToLimit(bestSolution.theta1, limits.theta1),
+            clampToLimit(bestSolution.theta2, limits.theta2),
+            clampToLimit(bestSolution.theta3, limits.theta3)
+        ];
+        result.solutions = validSolutions;
+        result.configuration = bestSolution.config;
+
         return result;
+    }
+
+    /**
+     * Wrap an angle in degrees to (-180, 180]
+     */
+    normalizeAngle(degrees) {
+        let a = degrees % 360;
+        if (a > 180) a -= 360;
+        if (a <= -180) a += 360;
+        return a;
+    }
+
+    /**
+     * Shortest shoulder-to-wrist distance the elbow limit allows
+     * (the elbow can't fold all the way back, so this is more than |L2 - L3|)
+     */
+    getMinReach() {
+        const maxFold = this.degToRad(Math.min(180, Math.max(
+            Math.abs(this.jointLimits.theta3.min),
+            Math.abs(this.jointLimits.theta3.max)
+        )));
+        return Math.sqrt(Math.max(0,
+            this.L2 * this.L2 + this.L3 * this.L3 + 2 * this.L2 * this.L3 * Math.cos(maxFold)));
     }
 
     /**
      * Check if angles are within joint limits
      */
     isWithinLimits(theta1, theta2, theta3) {
+        // Tiny tolerance: IK results land on a limit with floating-point noise
+        const eps = 1e-9;
         return (
-            theta1 >= this.jointLimits.theta1.min &&
-            theta1 <= this.jointLimits.theta1.max &&
-            theta2 >= this.jointLimits.theta2.min &&
-            theta2 <= this.jointLimits.theta2.max &&
-            theta3 >= this.jointLimits.theta3.min &&
-            theta3 <= this.jointLimits.theta3.max
+            theta1 >= this.jointLimits.theta1.min - eps &&
+            theta1 <= this.jointLimits.theta1.max + eps &&
+            theta2 >= this.jointLimits.theta2.min - eps &&
+            theta2 <= this.jointLimits.theta2.max + eps &&
+            theta3 >= this.jointLimits.theta3.min - eps &&
+            theta3 <= this.jointLimits.theta3.max + eps
         );
     }
 
@@ -287,12 +314,17 @@ class RobotKinematics {
      * @returns {Object} {valid: boolean, elbowZ: number, endEffectorZ: number}
      */
     isConfigurationAboveFloor(angles) {
-        const fk = this.forwardKinematics(angles);
-        const elbowZ = fk.positions.elbow.z;
-        const endZ = fk.positions.endEffector.z;
+        // Heights only depend on θ2 and θ3. Computed directly (not via
+        // forwardKinematics) so checking a candidate has no side effects.
+        const theta2 = this.degToRad(angles[1]);
+        const theta3 = this.degToRad(angles[2]);
+        const elbowZ = this.L1 + this.L2 * Math.sin(theta2);
+        const endZ = elbowZ + this.L3 * Math.sin(theta2 + theta3);
 
-        // Both elbow and end effector must be at or above floor level
-        const minFloorZ = 0;
+        // Both elbow and end effector must be at or above floor level.
+        // The links are straight segments, so the whole arm is then above it.
+        // (-1e-9: a joint exactly on the floor must not fail from rounding)
+        const minFloorZ = -1e-9;
 
         return {
             valid: elbowZ >= minFloorZ && endZ >= minFloorZ,
@@ -302,80 +334,218 @@ class RobotKinematics {
     }
 
     /**
+     * Check joint limits and the floor constraint together
+     * @param {Array} angles - Joint angles [theta1, theta2, theta3] in degrees
+     */
+    isConfigurationValid(angles) {
+        if (!Array.isArray(angles) || angles.length !== 3 || !angles.every(Number.isFinite)) {
+            return false;
+        }
+        return this.isWithinLimits(angles[0], angles[1], angles[2]) &&
+               this.isConfigurationAboveFloor(angles).valid;
+    }
+
+    /**
+     * Shoulder angle above which the elbow is high enough that the forearm
+     * cannot reach the floor, whatever the elbow angle is
+     * (L1 + L2·sin(θ2) ≥ L3)
+     */
+    getSafeShoulderAngle() {
+        const limits = this.jointLimits.theta2;
+        const s = (this.L3 - this.L1) / this.L2;
+        if (s <= -1) return limits.min;
+        if (s >= 1) return limits.max;
+        // 1° margin keeps the forearm clear of the floor plane
+        return Math.min(limits.max, Math.max(limits.min, this.radToDeg(Math.asin(s)) + 1));
+    }
+
+    /**
+     * Check that every configuration along a joint-space path stays above the floor
+     * @param {Array} waypoints - Joint configurations, linearly interpolated between
+     * @param {number} stepDeg - Sampling resolution in degrees
+     */
+    isPathAboveFloor(waypoints, stepDeg = 1) {
+        for (let w = 0; w < waypoints.length - 1; w++) {
+            const from = waypoints[w];
+            const to = waypoints[w + 1];
+            const maxDelta = Math.max(...from.map((a, i) => Math.abs(to[i] - a)));
+            const samples = Math.max(1, Math.ceil(maxDelta / stepDeg));
+
+            for (let s = 0; s <= samples; s++) {
+                const t = s / samples;
+                const angles = from.map((a, i) => a + (to[i] - a) * t);
+                if (!this.isConfigurationAboveFloor(angles).valid) return false;
+            }
+        }
+        return true;
+    }
+
+    /**
+     * Plan a joint-space path from start to target that never goes below the floor
+     *
+     * Moving all joints at once can sweep the arm through the floor even when both
+     * ends are valid. In that case the shoulder is raised first (which only raises
+     * the arm), base and elbow move while the arm is high, then the shoulder lowers
+     * onto the target.
+     *
+     * @param {Array} start - Current joint angles
+     * @param {Array} target - Target joint angles
+     * @returns {Array|null} Waypoints [start, ..., target], or null if the target is invalid/unreachable
+     */
+    planJointPath(start, target) {
+        if (!this.isConfigurationValid(target)) return null;
+
+        const direct = [[...start], [...target]];
+
+        // Escaping an invalid start (e.g. after changing link lengths): go straight there
+        if (!this.isConfigurationAboveFloor(start).valid) return direct;
+
+        if (this.isPathAboveFloor(direct)) return direct;
+
+        const candidates = [this.getSafeShoulderAngle(), this.jointLimits.theta2.max];
+        for (const safe of candidates) {
+            const lift = Math.max(start[1], target[1], safe);
+            const path = [
+                [...start],
+                [start[0], lift, start[2]],
+                [target[0], lift, target[2]],
+                [...target]
+            ].filter((waypoint, i, all) =>
+                i === 0 || waypoint.some((a, j) => Math.abs(a - all[i - 1][j]) > 1e-9)
+            );
+            if (this.isPathAboveFloor(path)) return path;
+        }
+        return null;
+    }
+
+    /**
      * Clamp a target position to the reachable workspace
-     * Returns the nearest valid position if the target is outside the workspace
+     *
+     * Returns the target itself when the arm can reach it (inside the joint limits
+     * and above the floor). Otherwise the target is projected onto the reachable
+     * shell around the shoulder; if that point is still blocked (floor, joint limits),
+     * the furthest reachable point on the way from `fromPoint` toward it is returned,
+     * so a dragged arm follows the cursor as far as it physically can.
      *
      * @param {number} x - Target X coordinate (kinematics frame)
      * @param {number} y - Target Y coordinate (kinematics frame)
      * @param {number} z - Target Z coordinate (kinematics frame)
+     * @param {Object} [fromPoint] - A reachable {x, y, z} to fall back toward (e.g. the current tip)
      * @returns {Object} Clamped position {x, y, z, wasClamped}
      */
-    clampToWorkspace(x, y, z) {
-        const result = { x, y, z, wasClamped: false };
+    clampToWorkspace(x, y, z, fromPoint = null) {
+        const anchor = fromPoint && this.isPointReachable(fromPoint.x, fromPoint.y, fromPoint.z)
+            ? { x: fromPoint.x, y: fromPoint.y, z: fromPoint.z }
+            : this.getAnchorPoint(x, y);
 
-        // Calculate horizontal distance and relative height
-        const r = Math.sqrt(x * x + y * y);
-        const zRel = z - this.L1;  // Height relative to shoulder
+        if (![x, y, z].every(Number.isFinite)) {
+            return { ...anchor, wasClamped: true };
+        }
 
-        // Distance from shoulder to target in the arm plane
-        const D = Math.sqrt(r * r + zRel * zRel);
+        if (this.isPointReachable(x, y, z)) {
+            return { x, y, z, wasClamped: false };
+        }
 
-        // Workspace boundaries
+        let candidate = this.projectToReachShell(x, y, z, anchor);
+        if (!this.isPointReachable(candidate.x, candidate.y, candidate.z)) {
+            candidate = this.furthestReachablePoint(anchor, candidate);
+        }
+        return { ...candidate, wasClamped: true };
+    }
+
+    /**
+     * True if some valid configuration (joint limits, floor) puts the tip at (x, y, z)
+     */
+    isPointReachable(x, y, z) {
+        return this.inverseKinematics(x, y, z).valid;
+    }
+
+    /**
+     * Project a point onto the shell minReach ≤ |p - shoulder| ≤ maxReach, at or above
+     * the floor, keeping its direction around the base
+     */
+    projectToReachShell(x, y, z, anchor) {
         const maxReach = this.L2 + this.L3;
-        const minReach = Math.abs(this.L2 - this.L3);
+        const minReach = this.getMinReach();
+        const margin = 1e-6;
 
-        // Minimum Z constraint - don't go below base level (with small margin)
-        const minZ = 0;  // Can't go below the base
+        const r = Math.sqrt(x * x + y * y);
+        // Direction around the base; on the Z axis use the anchor's
+        const azimuth = r > 1e-9 ? Math.atan2(y, x) : Math.atan2(anchor.y, anchor.x);
 
-        // First, clamp Z to minimum
-        if (z < minZ) {
-            result.z = minZ;
-            result.wasClamped = true;
-        }
+        let planarR = r;
+        let zRel = Math.max(z, 0) - this.L1;
+        const D = Math.sqrt(planarR * planarR + zRel * zRel);
 
-        // Recalculate with clamped Z
-        const clampedZRel = result.z - this.L1;
-        const newD = Math.sqrt(r * r + clampedZRel * clampedZRel);
-
-        // If distance exceeds max reach, scale position to max reach
-        if (newD > maxReach) {
-            // Scale factor to bring to max reach (with small margin for numerical stability)
-            const scale = (maxReach - 0.1) / newD;
-
-            // Scale the horizontal distance
-            const newR = r * scale;
-            const newZRel = clampedZRel * scale;
-
-            // Preserve the direction in XY plane
-            if (r > 0.001) {
-                result.x = x * (newR / r);
-                result.y = y * (newR / r);
+        if (D > maxReach) {
+            // Pull toward the shoulder; the shoulder is above the floor, so z stays ≥ 0
+            const scale = (maxReach - margin) / D;
+            planarR *= scale;
+            zRel *= scale;
+        } else if (D < minReach) {
+            if (D < 1e-9) {
+                planarR = minReach + margin;
+                zRel = 0;
+            } else {
+                const scale = (minReach + margin) / D;
+                planarR *= scale;
+                zRel *= scale;
             }
-            result.z = newZRel + this.L1;
-            result.wasClamped = true;
-        }
-        // If distance is less than min reach, push to min reach
-        else if (newD < minReach && newD > 0.001) {
-            const scale = (minReach + 0.1) / newD;
-
-            const newR = r * scale;
-            const newZRel = clampedZRel * scale;
-
-            if (r > 0.001) {
-                result.x = x * (newR / r);
-                result.y = y * (newR / r);
+            if (zRel + this.L1 < 0) {
+                // Pushed out through the floor: use the point of the inner shell at floor level
+                zRel = -this.L1;
+                planarR = Math.sqrt(Math.max(0, (minReach + margin) ** 2 - zRel * zRel));
             }
-            result.z = newZRel + this.L1;
-            result.wasClamped = true;
         }
 
-        // Final Z clamp check after scaling
-        if (result.z < minZ) {
-            result.z = minZ;
-            result.wasClamped = true;
-        }
+        return {
+            x: planarR * Math.cos(azimuth),
+            y: planarR * Math.sin(azimuth),
+            z: zRel + this.L1
+        };
+    }
 
-        return result;
+    /**
+     * A comfortably reachable point in the direction of (x, y): mid-reach at shoulder height
+     */
+    getAnchorPoint(x, y) {
+        const azimuth = Math.hypot(x, y) > 1e-9 ? Math.atan2(y, x) : 0;
+        const r = (this.getMinReach() + this.L2 + this.L3) / 2;
+        return { x: r * Math.cos(azimuth), y: r * Math.sin(azimuth), z: this.L1 };
+    }
+
+    /**
+     * Furthest reachable point on the segment from `from` (reachable) toward `to`
+     */
+    furthestReachablePoint(from, to) {
+        const at = t => ({
+            x: from.x + (to.x - from.x) * t,
+            y: from.y + (to.y - from.y) * t,
+            z: from.z + (to.z - from.z) * t
+        });
+        const reachable = t => {
+            const p = at(t);
+            return this.isPointReachable(p.x, p.y, p.z);
+        };
+
+        // Coarse scan from the target back toward the start...
+        const steps = 32;
+        let lo = 0;
+        let hi = 1;
+        for (let i = steps - 1; i >= 0; i--) {
+            if (reachable(i / steps)) {
+                lo = i / steps;
+                hi = (i + 1) / steps;
+                break;
+            }
+        }
+        // ...then refine the boundary
+        for (let i = 0; i < 20; i++) {
+            const mid = (lo + hi) / 2;
+            if (reachable(mid)) lo = mid;
+            else hi = mid;
+        }
+        return at(lo);
     }
 
     /**
@@ -455,7 +625,7 @@ class RobotKinematics {
             linkLengths: { L1: this.L1, L2: this.L2, L3: this.L3 },
             jointLimits: this.jointLimits,
             maxReach: this.L2 + this.L3,
-            minReach: Math.abs(this.L2 - this.L3)
+            minReach: this.getMinReach()
         };
     }
 

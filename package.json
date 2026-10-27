@@ -1,0 +1,15 @@
+{
+  "name": "roboarm-3d",
+  "version": "1.1.0",
+  "private": true,
+  "description": "Visualizacion y control 3D de un brazo robotico de 3 DOF con motores NEMA 17",
+  "scripts": {
+    "start": "python3 server.py",
+    "test": "node --test tests/unit/kinematics.test.js tests/unit/positions.test.js",
+    "test:e2e": "node --test --test-concurrency=1 tests/e2e/app.test.js"
+  },
+  "devDependencies": {
+    "playwright": "^1.40.0"
+  },
+  "license": "MIT"
+}
