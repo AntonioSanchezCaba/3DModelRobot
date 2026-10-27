@@ -4,14 +4,14 @@
  * Three.js integration with kinematics and UI
  * =====================================================
  *
- * Coordinate System Mapping:
+ * Coordinate System Mapping (both frames are right-handed, so this is a rotation,
+ * not a mirror image: the 3D view turns the same way as the real arm):
  * - Kinematics: X=forward, Y=left, Z=up
- * - Three.js:   X=right, Y=up, Z=forward
+ * - Three.js:   X=right, Y=up, Z=toward the viewer
  *
- * For this application, we align them:
  * - Kinematics X -> Three.js X
- * - Kinematics Y -> Three.js Z
- * - Kinematics Z -> Three.js Y
+ * - Kinematics Y -> Three.js -Z
+ * - Kinematics Z -> Three.js Y (+ base platform height)
  */
 
 // Height of the base platform: kinematic Z = 0 sits this far above the Three.js ground
@@ -19,6 +19,10 @@ const BASE_HEIGHT = 12;
 
 // Longest end-effector trail drawn when "Mostrar trayectoria" is on
 const MAX_TRAJECTORY_POINTS = 500;
+
+// Largest joint change (degrees) a single drag move may cause; beyond it the arm
+// would jump to another configuration, so it stops at the limit instead
+const DRAG_MAX_JOINT_STEP = 20;
 
 // How close (CSS px) the pointer must be to a handle's center to grab it
 const HANDLE_PICK_RADIUS = 45;
@@ -257,10 +261,16 @@ class RobotArmController {
         this.controls.target.set(50, 50, 0);
 
         // Narrow screens: start further away so the whole arm is visible
+        this.appliedDistanceFactor = this.viewDistanceFactor();
         this.camera.position.sub(this.controls.target)
-            .multiplyScalar(this.viewDistanceFactor())
+            .multiplyScalar(this.appliedDistanceFactor)
             .add(this.controls.target);
         this.controls.update();
+
+        // A handle highlighted on hover may no longer be under the pointer once the camera moves
+        this.controls.addEventListener('change', () => {
+            if (this.isHoveringHandle && !this.isDragging) this.clearHover();
+        });
     }
 
     /**
@@ -297,6 +307,8 @@ class RobotArmController {
 
         // Axes helper (X=red, Y=green/up, Z=blue)
         this.axesHelper = new THREE.AxesHelper(100);
+        // Blue axis along Three.js -Z = kinematic +Y (red X, green Z up, blue Y)
+        this.axesHelper.scale.z = -1;
         this.scene.add(this.axesHelper);
     }
 
@@ -546,6 +558,11 @@ class RobotArmController {
         // Pointer events also cover touch. Without this the browser would pan/zoom
         // the page (and cancel the pointer) while a finger drags a handle.
         canvas.style.touchAction = 'none';
+
+        // Leaving the canvas ends hover feedback (cursor and highlight)
+        canvas.addEventListener('pointerleave', () => {
+            if (!this.isDragging) this.clearHover();
+        });
     }
 
     /**
@@ -852,13 +869,25 @@ class RobotArmController {
     }
 
     /**
+     * Drop hover feedback: both handles idle, default cursor
+     */
+    clearHover() {
+        this.setHandleState('end', 'idle');
+        this.setHandleState('elbow', 'idle');
+        if (this.isHoveringHandle) {
+            document.body.style.cursor = 'default';
+            this.isHoveringHandle = false;
+        }
+    }
+
+    /**
      * Convert a Three.js world point to kinematics coordinates
-     * (Three.js X → kin X, Three.js Z → kin Y, Three.js Y - base height → kin Z)
+     * (Three.js X → kin X, Three.js -Z → kin Y, Three.js Y - base height → kin Z)
      */
     threeToKinematics(point) {
         return {
             x: point.x,
-            y: point.z,
+            y: -point.z,
             z: point.y - BASE_HEIGHT
         };
     }
@@ -870,11 +899,13 @@ class RobotArmController {
         const target = this.threeToKinematics(point);
         const tip = this.kinematics.forwardKinematics(this.currentAngles).position;
 
-        // Follow the cursor as far as the arm can go (reach, joint limits, floor)
-        const clamped = this.kinematics.clampToWorkspace(target.x, target.y, target.z, tip);
+        // Follow the cursor as far as the arm can go (reach, joint limits, floor) without
+        // jumping to another configuration (elbow flip, base spin) in a single move
+        const options = { reference: this.currentAngles, maxStep: DRAG_MAX_JOINT_STEP };
+        const clamped = this.kinematics.clampToWorkspace(target.x, target.y, target.z, tip, options);
 
         // Solution closest to the current pose, so the arm never flips while dragging
-        const ikResult = this.kinematics.inverseKinematics(clamped.x, clamped.y, clamped.z, this.currentAngles);
+        const ikResult = this.kinematics.inverseKinematics(clamped.x, clamped.y, clamped.z, this.currentAngles, options);
 
         if (!ikResult.valid) {
             // Only possible if the current pose itself is no longer reachable
@@ -1045,8 +1076,9 @@ class RobotArmController {
             }
             const floorCheck = this.kinematics.isConfigurationAboveFloor(angles);
             if (!floorCheck.valid) {
+                // Name the part that is below the floor, with its own height
                 const part = floorCheck.elbowZ < 0 ? 'codo' : 'efector';
-                const z = Math.min(floorCheck.elbowZ, floorCheck.endEffectorZ);
+                const z = floorCheck.elbowZ < 0 ? floorCheck.elbowZ : floorCheck.endEffectorZ;
                 this.updateStatus(`⛔ Configuración inválida: ${part} en Z=${z.toFixed(1)}mm`);
                 return false;
             }
@@ -1059,8 +1091,8 @@ class RobotArmController {
         }
 
         // θ1: Base rotation around Y axis
-        // Negate: Three.js Y+ rotation is toward -Z, but kinematics θ1+ is toward +kinY = +threeZ
-        this.joint1Pivot.rotation.y = -angles[0] * Math.PI / 180;
+        // Three.js Y+ rotation turns +X toward -Z, which is kinematic +Y: same sense as θ1
+        this.joint1Pivot.rotation.y = angles[0] * Math.PI / 180;
         // θ2: Shoulder pitch around Z in local frame (positive = arm goes UP)
         this.joint2Pivot.rotation.z = angles[1] * Math.PI / 180;
         // θ3: Elbow pitch around Z in local frame (positive = forearm folds UP)
@@ -1091,12 +1123,10 @@ class RobotArmController {
         const fk = this.kinematics.forwardKinematics(this.currentAngles);
 
         // Convert kinematics coords to Three.js coords
-        // Kinematics: X=forward, Y=left, Z=up
-        // Three.js: X=right, Y=up, Z=forward
-        // Our mapping: kinX->threeX, kinY->threeZ, kinZ->threeY
+        // Our mapping: kinX->threeX, kinY->-threeZ, kinZ->threeY
         const threeX = fk.position.x;
         const threeY = fk.position.z + BASE_HEIGHT;  // Add base height offset
-        const threeZ = fk.position.y;
+        const threeZ = -fk.position.y;
 
         const geometry = this.trajectoryLine.geometry;
         const attribute = geometry.attributes.position;
@@ -1124,7 +1154,7 @@ class RobotArmController {
         // Convert kinematics coords to Three.js coords
         const threeX = x;
         const threeY = z + BASE_HEIGHT;  // Base height offset
-        const threeZ = y;
+        const threeZ = -y;
 
         this.targetMarker.position.set(threeX, threeY, threeZ);
         this.targetMarker.visible = true;
@@ -1283,6 +1313,17 @@ class RobotArmController {
         this.camera.updateProjectionMatrix();
         this.renderer.setSize(width, height);
 
+        // Keep the narrow-screen framing (e.g. a phone rotated to portrait), but keep
+        // the user's viewing direction and zoom relative to it
+        const factor = this.viewDistanceFactor();
+        if (Math.abs(factor - this.appliedDistanceFactor) > 1e-6) {
+            this.camera.position.sub(this.controls.target)
+                .multiplyScalar(factor / this.appliedDistanceFactor)
+                .add(this.controls.target);
+            this.appliedDistanceFactor = factor;
+            this.controls.update();
+        }
+
         this.updateAxesIndicator(true);
     }
 
@@ -1303,7 +1344,7 @@ class RobotArmController {
         // Kinematic axes in Three.js coordinates, colored like the scene's axes helper
         this.axesIndicatorAxes = [
             { label: 'X', direction: new THREE.Vector3(1, 0, 0), view: new THREE.Vector3(), color: '#ef4444' },
-            { label: 'Y', direction: new THREE.Vector3(0, 0, 1), view: new THREE.Vector3(), color: '#3b82f6' },
+            { label: 'Y', direction: new THREE.Vector3(0, 0, -1), view: new THREE.Vector3(), color: '#3b82f6' },
             { label: 'Z', direction: new THREE.Vector3(0, 1, 0), view: new THREE.Vector3(), color: '#22c55e' }
         ];
     }

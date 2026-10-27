@@ -23,6 +23,7 @@ class UIController {
         this.isAnimating = false;
         this.animationFrame = null;
         this.animationToken = 0;
+        this.animationTarget = null;
 
         // User-named positions persisted in localStorage
         this.positionStore = new SavedPositionsStore({
@@ -74,7 +75,10 @@ class UIController {
                 });
 
                 this.currentSection = view;
-                this.showToast('info', 'Sección cambiada', `Vista: ${this.getSectionName(view)}`);
+
+                // Start the new section at its top (the panel may be scrolled down to
+                // the saved positions, which would leave the new section out of view)
+                document.querySelector('.control-panel').scrollTop = 0;
             });
         });
     }
@@ -108,6 +112,9 @@ class UIController {
                 this.updateSliderFill(slider, sliderFill);
                 this.updateJoint(index, value);
             });
+
+            // Typing wins over a running animation (which would overwrite the box)
+            input.addEventListener('input', () => this.cancelAnimation());
 
             // Input change
             input.addEventListener('change', (e) => {
@@ -184,6 +191,16 @@ class UIController {
         }
         this.updateKinematicsDisplay();
         this.updatePositionDisplay();
+        this.showPositionStatus();
+    }
+
+    /**
+     * Status bar: where the end effector is now (replaces stale drag/error messages)
+     */
+    showPositionStatus() {
+        if (!this.robot || !this.robot.kinematics) return;
+        const p = this.robot.kinematics.forwardKinematics(this.robot.getCurrentAngles()).position;
+        this.robot.updateStatus(`Posición: X=${p.x.toFixed(1)}, Y=${p.y.toFixed(1)}, Z=${p.z.toFixed(1)} mm`);
     }
 
     /**
@@ -191,7 +208,11 @@ class UIController {
      */
     animateToAngle(jointIndex, targetAngle) {
         if (!this.robot) return false;
-        const target = this.robot.getCurrentAngles();
+        // During an animation, change that joint of where the arm is heading,
+        // not of whatever mid-way pose it happens to be in
+        const target = this.isAnimating && this.animationTarget
+            ? [...this.animationTarget]
+            : this.robot.getCurrentAngles();
         target[jointIndex] = targetAngle;
         return this.animateToPosition(target);
     }
@@ -351,6 +372,24 @@ class UIController {
     }
 
     /**
+     * Clear the IK result, the Apply button and the target marker
+     */
+    resetInverseKinematicsPanel() {
+        ['ik-theta1', 'ik-theta2', 'ik-theta3'].forEach(id => {
+            document.getElementById(id).textContent = '--°';
+        });
+        const statusEl = document.getElementById('ik-status');
+        statusEl.className = 'ik-status';
+        statusEl.textContent = '';
+
+        const applyBtn = document.getElementById('btn-apply-ik');
+        applyBtn.disabled = true;
+        delete applyBtn.dataset.angles;
+
+        if (this.robot) this.robot.hideTargetMarker();
+    }
+
+    /**
      * Apply calculated IK angles to robot
      */
     applyInverseKinematics() {
@@ -359,7 +398,8 @@ class UIController {
 
         if (anglesStr) {
             const angles = JSON.parse(anglesStr);
-            if (this.animateToPosition(angles)) {
+            const done = { onComplete: () => this.robot.hideTargetMarker() };
+            if (this.animateToPosition(angles, done)) {
                 this.showToast('success', 'Posición aplicada', 'Moviendo a posición calculada');
             }
         }
@@ -405,7 +445,7 @@ class UIController {
         if (totalLength < 1e-6) {
             this.robot.setJointAngles(target, { validate: false });
             this.syncControlsFromRobot();
-            this.robot.hideTargetMarker();
+            this.showPositionStatus();
             if (onComplete) onComplete();
             return true;
         }
@@ -415,6 +455,8 @@ class UIController {
         const startTime = performance.now();
         const token = ++this.animationToken;
         this.isAnimating = true;
+        this.animationTarget = target;
+        this.robot.updateStatus('Moviendo...');
 
         const animate = (currentTime) => {
             if (token !== this.animationToken) return;
@@ -435,7 +477,8 @@ class UIController {
             } else {
                 this.isAnimating = false;
                 this.animationFrame = null;
-                this.robot.hideTargetMarker();
+                this.animationTarget = null;
+                this.showPositionStatus();
                 if (onComplete) onComplete();
             }
         };
@@ -468,6 +511,7 @@ class UIController {
             this.animationFrame = null;
         }
         this.isAnimating = false;
+        this.animationTarget = null;
     }
 
     /**
@@ -477,7 +521,7 @@ class UIController {
         if (!this.robot) return;
         const angles = this.robot.getCurrentAngles();
         for (let i = 0; i < 3; i++) {
-            this.setJointAngle(i, angles[i]);
+            this.setJointAngle(i, angles[i], { skipFocusedInput: true });
         }
         this.updateKinematicsDisplay();
         this.updatePositionDisplay();
@@ -521,6 +565,9 @@ class UIController {
             // Saved positions show coordinates computed with the link lengths
             this.renderSavedPositions();
 
+            // An IK result computed with the old lengths no longer reaches its target
+            this.resetInverseKinematicsPanel();
+
             if (poseKept) {
                 this.showToast('success', 'Parámetros actualizados', 'Geometría del robot actualizada');
             } else {
@@ -530,7 +577,13 @@ class UIController {
         });
 
         // Motor resolution
-        document.getElementById('motor-steps').addEventListener('input', () => this.updateMotorStepsDisplay());
+        const stepsInput = document.getElementById('motor-steps');
+        stepsInput.addEventListener('input', () => this.updateMotorStepsDisplay());
+        // When editing ends, show the value actually used
+        stepsInput.addEventListener('change', () => {
+            stepsInput.value = this.getMotorSettings().stepsPerRev;
+            this.updateMotorStepsDisplay();
+        });
         document.getElementById('motor-microstepping').addEventListener('change', () => this.updateMotorStepsDisplay());
 
         // Animation speed
@@ -622,7 +675,11 @@ class UIController {
             }
         });
 
-        this.positionStore.onChange(() => this.renderSavedPositions());
+        this.positionStore.onChange(() => {
+            this.renderSavedPositions();
+            // An open save/rename dialog must see names saved meanwhile (e.g. in another tab)
+            this.validateDialog();
+        });
 
         // Keep several open tabs in sync
         window.addEventListener('storage', (e) => {
@@ -654,21 +711,34 @@ class UIController {
             item.className = 'saved-position';
             item.dataset.id = position.id;
 
+            // Saved with other link lengths, a pose can end up below the floor
+            const reachable = !this.robot || this.robot.kinematics.isConfigurationValid(position.angles);
+            item.classList.toggle('unreachable', !reachable);
+
             // Built with textContent: names are user input
             const goBtn = document.createElement('button');
             goBtn.type = 'button';
             goBtn.className = 'saved-position-go';
-            goBtn.title = `Mover a "${position.name}"`;
+            goBtn.title = reachable
+                ? `Mover a "${position.name}"`
+                : `"${position.name}" no es alcanzable con la geometría actual`;
 
+            // Name and "actual" badge side by side, so a long name's ellipsis never hides the badge
+            const title = document.createElement('span');
+            title.className = 'saved-position-title';
             const name = document.createElement('span');
             name.className = 'saved-position-name';
             name.textContent = position.name;
+            const badge = document.createElement('span');
+            badge.className = 'saved-position-badge';
+            badge.textContent = reachable ? 'actual' : 'no alcanzable';
+            title.append(name, badge);
 
             const angles = document.createElement('span');
             angles.className = 'saved-position-meta';
             angles.textContent = this.formatAngles(position.angles);
 
-            goBtn.append(name, angles);
+            goBtn.append(title, angles);
 
             const coords = this.formatCoordinates(position.angles);
             if (coords) {
@@ -811,6 +881,8 @@ class UIController {
         } catch (err) {
             this.showToast('error', 'No se pudo renombrar', err.message);
         }
+        // The list was rebuilt: put focus back on this item's rename button
+        this.focusSavedPosition(id, '[data-action=rename]');
     }
 
     async confirmDeletePosition(id) {
@@ -826,9 +898,29 @@ class UIController {
         });
         if (!result.confirmed) return;
 
+        const index = this.positionStore.list().findIndex(p => p.id === id);
         if (this.positionStore.remove(id)) {
             this.showToast('info', 'Posición eliminada', `"${position.name}"`);
+
+            // Focus the item that took its place (or the one before), or Guardar if none is left
+            const remaining = this.positionStore.list();
+            const neighbour = remaining[Math.min(index, remaining.length - 1)];
+            if (neighbour) {
+                this.focusSavedPosition(neighbour.id, '.saved-position-go');
+            } else {
+                document.getElementById('btn-save-position').focus();
+            }
         }
+    }
+
+    /**
+     * Focus a control of a saved position's list item
+     */
+    focusSavedPosition(id, selector) {
+        const item = [...document.querySelectorAll('#saved-positions-list .saved-position')]
+            .find(el => el.dataset.id === id);
+        const target = item && item.querySelector(selector);
+        if (target) target.focus();
     }
 
     goToSavedPosition(id) {
@@ -872,18 +964,25 @@ class UIController {
     async importSavedPositions(file) {
         try {
             const text = await file.text();
-            const { added, updated, skipped, persisted } = this.positionStore.importJSON(text);
+            // Only poses this robot can actually reach (limits, floor)
+            const { added, updated, skipped, unreachable, persisted } = this.positionStore.importJSON(text, {
+                isReachable: angles => this.robot.kinematics.isConfigurationValid(angles)
+            });
+
+            const problems = [];
+            if (skipped) problems.push(`${skipped} no válida(s)`);
+            if (unreachable) problems.push(`${unreachable} fuera de alcance`);
 
             if (added === 0 && updated === 0) {
                 this.showToast('warning', 'Nada importado',
-                    skipped ? `${skipped} entrada(s) no válidas` : 'El archivo no contiene posiciones');
+                    problems.length ? problems.join(' · ') : 'El archivo no contiene posiciones');
                 return;
             }
 
             const parts = [];
             if (added) parts.push(`${added} nueva(s)`);
             if (updated) parts.push(`${updated} actualizada(s)`);
-            if (skipped) parts.push(`${skipped} ignorada(s)`);
+            parts.push(...problems);
             this.showToast('success', 'Posiciones importadas', parts.join(' · '));
             if (!persisted) this.warnNotPersisted();
         } catch (err) {
@@ -911,7 +1010,11 @@ class UIController {
         });
         cancelBtn.addEventListener('click', () => this.closeDialog(false));
         backdrop.addEventListener('mousedown', (e) => {
-            if (e.target === backdrop) this.closeDialog(false);
+            if (e.target === backdrop) {
+                // Otherwise the browser moves focus to <body> after we restore it
+                e.preventDefault();
+                this.closeDialog(false);
+            }
         });
         // Document level: works even if focus left the dialog (e.g. a click on its padding)
         document.addEventListener('keydown', (e) => {
@@ -1071,16 +1174,17 @@ class UIController {
     }
 
     /**
-     * Stepper resolution from the settings (invalid input falls back to NEMA 17 defaults)
+     * Stepper resolution from the settings: steps/rev is kept inside the input's
+     * range (empty input falls back to the NEMA 17 default of 200)
      * @returns {Object} {stepsPerRev, microstepping}
      */
     getMotorSettings() {
         const stepsInput = document.getElementById('motor-steps');
         let stepsPerRev = parseInt(stepsInput.value, 10);
-        if (!Number.isFinite(stepsPerRev) || stepsPerRev < parseInt(stepsInput.min, 10) ||
-            stepsPerRev > parseInt(stepsInput.max, 10)) {
+        if (!Number.isFinite(stepsPerRev)) {
             stepsPerRev = 200;
         }
+        stepsPerRev = Math.min(parseInt(stepsInput.max, 10), Math.max(parseInt(stepsInput.min, 10), stepsPerRev));
         const microstepping = parseInt(document.getElementById('motor-microstepping').value, 10) || 16;
         return { stepsPerRev, microstepping };
     }
@@ -1125,7 +1229,7 @@ class UIController {
     /**
      * Set joint angle from external source
      */
-    setJointAngle(jointIndex, angle) {
+    setJointAngle(jointIndex, angle, { skipFocusedInput = false } = {}) {
         const control = document.querySelectorAll('.joint-control')[jointIndex];
         if (control) {
             const slider = control.querySelector('.joint-slider');
@@ -1133,7 +1237,10 @@ class UIController {
             const sliderFill = control.querySelector('.slider-fill');
 
             slider.value = angle;
-            input.value = Math.round(angle);
+            // Don't overwrite a number the user is typing
+            if (!(skipFocusedInput && document.activeElement === input)) {
+                input.value = Math.round(angle);
+            }
             this.updateSliderFill(slider, sliderFill);
         }
     }

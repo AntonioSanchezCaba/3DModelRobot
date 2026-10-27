@@ -224,3 +224,42 @@ test('export can include motor settings and step counts', () => {
     // Files with extra fields import cleanly
     assert.equal(createStore().importJSON(JSON.stringify(data)).added, 1);
 });
+
+test('only real numbers are accepted as angles', () => {
+    const store = createStore();
+    for (const angles of [[null, null, null], ['', ' ', '\n'], [true, false, 0], [[45], 0, 0], ['10', 0, 0]]) {
+        assert.throws(() => store.save('X', angles), `${JSON.stringify(angles)} must be rejected`);
+    }
+    const result = store.importJSON('[{"name":"nulls","angles":[null,null,null]}]');
+    assert.equal(result.added, 0);
+    assert.equal(result.skipped, 1);
+});
+
+test('angles keep full precision (rounding could push a floor pose below the floor)', () => {
+    const storage = new MemoryStorage();
+    const store = createStore(storage);
+    const angles = [9.405371234567, 12.220134567891, -129.398961234567];
+    const { position } = store.save('Mesa', angles);
+    assert.deepEqual(position.angles, angles);
+    // ...and survive a reload exactly
+    assert.deepEqual(createStore(storage).findByName('Mesa').angles, angles);
+});
+
+test('names that differ only in Unicode composition are the same name', () => {
+    const store = createStore();
+    store.save('Posición', [0, 0, 0]);                 // precomposed ó
+    const second = store.save('Posición', [1, 1, 1]);  // o + combining accent
+    assert.equal(second.overwritten, true);
+    assert.equal(store.list().length, 1);
+});
+
+test('import can skip poses the robot cannot reach', () => {
+    const store = createStore();
+    const file = JSON.stringify({ positions: [
+        { name: 'ok', angles: [0, 0, 0] },
+        { name: 'floor', angles: [0, -90, 0] }
+    ] });
+    const result = store.importJSON(file, { isReachable: angles => angles[1] > -30 });
+    assert.deepEqual({ added: result.added, unreachable: result.unreachable }, { added: 1, unreachable: 1 });
+    assert.deepEqual(store.list().map(p => p.name), ['ok']);
+});

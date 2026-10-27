@@ -45,7 +45,8 @@ class SavedPositionsStore {
      * Collapse whitespace so "  Pick   A " and "Pick A" are the same name
      */
     static normalizeName(name) {
-        return String(name == null ? '' : name).trim().replace(/\s+/g, ' ');
+        // NFC: a pasted "o" + combining accent and a typed "ó" are the same name
+        return String(name == null ? '' : name).normalize('NFC').trim().replace(/\s+/g, ' ');
     }
 
     static nameKey(name) {
@@ -91,7 +92,11 @@ class SavedPositionsStore {
 
     /**
      * Validate joint angles: three finite numbers inside the joint limits
-     * @returns {Array|null} Rounded angles, or null if invalid
+     *
+     * Angles are kept at full precision: rounding a pose that touches the floor
+     * could push it a hair below it and make it unreachable.
+     *
+     * @returns {Array|null} The angles, or null if invalid
      */
     sanitizeAngles(angles) {
         if (!Array.isArray(angles) || angles.length !== 3) return null;
@@ -99,15 +104,16 @@ class SavedPositionsStore {
         const keys = ['theta1', 'theta2', 'theta3'];
         const clean = [];
         for (let i = 0; i < 3; i++) {
-            const value = Number(angles[i]);
-            if (!Number.isFinite(value)) return null;
+            const value = angles[i];
+            // Real numbers only: Number(null), Number('') and Number(true) would sneak in as 0 or 1
+            if (typeof value !== 'number' || !Number.isFinite(value)) return null;
 
             if (this.jointLimits) {
                 const limits = this.jointLimits[keys[i]];
                 // Small tolerance for values that went through rounding
                 if (value < limits.min - 1e-6 || value > limits.max + 1e-6) return null;
             }
-            clean.push(Math.round(value * 1000) / 1000);
+            clean.push(value);
         }
         return clean;
     }
@@ -320,9 +326,13 @@ class SavedPositionsStore {
 
     /**
      * Merge positions from a backup file. Positions with an existing name are overwritten.
-     * @returns {Object} {added, updated, skipped, persisted}
+     * @param {string} text - File contents
+     * @param {Object} [options]
+     * @param {Function} [options.isReachable] - angles -> boolean; poses it rejects are
+     *   skipped and counted as unreachable (e.g. below the floor with the current robot)
+     * @returns {Object} {added, updated, skipped, unreachable, persisted}
      */
-    importJSON(text) {
+    importJSON(text, { isReachable = null } = {}) {
         let data;
         try {
             data = JSON.parse(text);
@@ -333,7 +343,7 @@ class SavedPositionsStore {
         const items = Array.isArray(data) ? data : (data && Array.isArray(data.positions) ? data.positions : null);
         if (!items) throw new Error('El archivo no contiene posiciones guardadas');
 
-        const result = { added: 0, updated: 0, skipped: 0, persisted: true };
+        const result = { added: 0, updated: 0, skipped: 0, unreachable: 0, persisted: true };
         const now = Date.now();
 
         for (const raw of items) {
@@ -341,6 +351,10 @@ class SavedPositionsStore {
             const entry = this.sanitizeEntry({ ...raw, id: null });
             if (!entry) {
                 result.skipped++;
+                continue;
+            }
+            if (isReachable && !isReachable(entry.angles)) {
+                result.unreachable++;
                 continue;
             }
 

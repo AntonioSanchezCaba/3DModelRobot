@@ -127,7 +127,7 @@ function robotState(page) {
             dragging: rc.isDragging,
             sliders: [...document.querySelectorAll('.joint-slider')].map(s => parseFloat(s.value)),
             handle: rc.dragHandle.position.toArray(),
-            fkThree: [fk.x, fk.z + 12, fk.y],
+            fkThree: [fk.x, fk.z + 12, -fk.y],
             handleColor: rc.dragHandle.material.color.getHex(),
             ringColor: rc.dragHandle.children[0].material.color.getHex(),
             status: document.getElementById('status-message').textContent
@@ -526,4 +526,81 @@ test('motor steps follow the joint angles and resolution', async (t) => {
 
     assert.deepEqual(errors, []);
     await context.close();
+});
+
+test('typing an angle during an animation wins, and quick buttons keep the animation target', async (t) => {
+    const { page, errors } = await openApp(t);
+
+    // Slow animation so it is still running while the user types
+    await page.evaluate(() => {
+        window.robotController.ui.animationSpeed = 0.1;
+        window.robotController.ui.animateToPosition([170, 0, 0]);
+    });
+    await page.click('#joint1-input', { clickCount: 3 });
+    await page.keyboard.type('60');
+    await page.keyboard.press('Enter');
+    let state = await robotState(page);
+    assert.ok(near(state.angles[0], 60), `θ1 = ${state.angles[0]}`);
+    assert.equal(await page.inputValue('#joint1-input'), '60');
+
+    // A quick button pressed mid-animation changes one joint of the target, not of the mid-way pose
+    await page.evaluate(() => {
+        window.robotController.ui.animationSpeed = 1;
+        window.robotController.setJointAngles([0, 0, 0]);
+        window.robotController.ui.goToPreset('pick');
+    });
+    await page.locator('.joint-control[data-joint="0"] .quick-btn[data-angle="-90"]').click();
+    await waitForAnimation(page);
+    state = await robotState(page);
+    assert.ok(sameAngles(state.angles, [-90, 30, -45]), `got ${state.angles}`);
+
+    assert.deepEqual(errors, []);
+});
+
+test('changing link lengths clears a stale IK result', async (t) => {
+    const { page, errors } = await openApp(t);
+    await page.click('.nav-btn[data-view="kinematics"]');
+    await page.click('#btn-calc-ik');
+    assert.equal(await page.isDisabled('#btn-apply-ik'), false);
+
+    await page.click('.nav-btn[data-view="settings"]');
+    await page.fill('#param-l3', '60');
+    await page.click('#btn-apply-params');
+
+    assert.equal(await page.isDisabled('#btn-apply-ik'), true);
+    assert.equal(await page.textContent('#ik-theta1'), '--°');
+    assert.equal(await page.evaluate(() => window.robotController.targetMarker.visible), false);
+    assert.deepEqual(errors, []);
+});
+
+test('switching tabs shows the new section from its top', async (t) => {
+    const { page, errors } = await openApp(t, { viewport: { width: 1280, height: 720 } });
+    await page.evaluate(() => { document.querySelector('.control-panel').scrollTop = 10000; });
+    await page.click('.nav-btn[data-view="kinematics"]');
+    const top = await page.evaluate(() => {
+        const panel = document.querySelector('.control-panel').getBoundingClientRect();
+        return document.getElementById('section-kinematics').getBoundingClientRect().top - panel.top;
+    });
+    assert.ok(top >= 0 && top < 50, `section starts ${top}px from the panel top`);
+    assert.deepEqual(errors, []);
+});
+
+test('importing skips unreachable poses; the 3D view is not mirrored', async (t) => {
+    const { page, errors } = await openApp(t);
+    const file = path.join(require('node:os').tmpdir(), `roboarm-import-${process.pid}.json`);
+    fs.writeFileSync(file, JSON.stringify({ positions: [
+        { name: 'Bien', angles: [10, 20, -30] },
+        { name: 'Bajo el suelo', angles: [0, -90, 0] }
+    ] }));
+    await page.setInputFiles('#import-positions-file', file);
+    await page.waitForFunction(() => document.querySelectorAll('.saved-position').length === 1);
+    assert.match(await page.textContent('#toast-container'), /1 fuera de alcance/);
+    fs.unlinkSync(file);
+
+    // θ1 = +90° turns the arm toward kinematic +Y, i.e. Three.js -Z (a rotation, not a mirror)
+    await page.evaluate(() => window.robotController.setJointAngles([90, 0, 0]));
+    const handle = (await robotState(page)).handle;
+    assert.ok(near(handle[0], 0, 1e-6) && near(handle[2], -180, 1e-6), `handle at ${handle}`);
+
+    assert.deepEqual(errors, []);
 });

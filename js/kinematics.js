@@ -141,9 +141,12 @@ class RobotKinematics {
      * @param {number} y - Target Y position (mm)
      * @param {number} z - Target Z position (mm)
      * @param {Array} [referenceAngles] - Configuration to stay close to (defaults to currentAngles)
+     * @param {Object} [options]
+     * @param {number} [options.maxStep] - Discard solutions that move any joint more than this
+     *   many degrees away from the reference (keeps a dragged arm from flipping branches)
      * @returns {Object} Result with angles and validity status
      */
-    inverseKinematics(x, y, z, referenceAngles = this.currentAngles) {
+    inverseKinematics(x, y, z, referenceAngles = this.currentAngles, { maxStep = Infinity } = {}) {
         const result = {
             valid: false,
             angles: [0, 0, 0],
@@ -160,14 +163,14 @@ class RobotKinematics {
             ? referenceAngles
             : [0, 0, 0];
 
-        // r is the horizontal distance from the base axis
-        const r = Math.sqrt(x * x + y * y);
+        // r is the horizontal distance from the base axis (hypot: no overflow for huge inputs)
+        const r = Math.hypot(x, y);
 
         // Height relative to shoulder
         const zRel = z - this.L1;
 
         // Distance from shoulder to target in the arm plane
-        const D = Math.sqrt(r * r + zRel * zRel);
+        const D = Math.hypot(r, zRel);
 
         // Check reachability
         const maxReach = this.L2 + this.L3;
@@ -217,6 +220,14 @@ class RobotKinematics {
             }
         }
 
+        // θ1 = 180° and -180° are the same direction and both within limits:
+        // offer both so the one next to the reference can be picked
+        candidates.slice().forEach(sol => {
+            if (Math.abs(Math.abs(sol.theta1) - 180) < 1e-9) {
+                candidates.push({ ...sol, theta1: -sol.theta1 });
+            }
+        });
+
         // Fully extended / fully folded: elbow up and down coincide
         const solutions = candidates.filter((sol, i) => !candidates.slice(0, i).some(other =>
             Math.abs(other.theta1 - sol.theta1) < 1e-9 &&
@@ -238,11 +249,21 @@ class RobotKinematics {
             return result;
         }
 
+        // ...and, while dragging, by how far the joints would jump
+        const reachableSolutions = validSolutions.filter(sol =>
+            Math.abs(sol.theta1 - reference[0]) <= maxStep &&
+            Math.abs(sol.theta2 - reference[1]) <= maxStep &&
+            Math.abs(sol.theta3 - reference[2]) <= maxStep);
+        if (reachableSolutions.length === 0) {
+            result.error = "Solo se alcanza cambiando bruscamente la configuración del brazo";
+            return result;
+        }
+
         // Select best solution (closest to reference configuration). The base can't
         // wrap past ±180°, so plain differences are the real joint travel.
-        let bestSolution = validSolutions[0];
+        let bestSolution = reachableSolutions[0];
         let minDist = Infinity;
-        for (const sol of validSolutions) {
+        for (const sol of reachableSolutions) {
             const dist = Math.hypot(
                 sol.theta1 - reference[0],
                 sol.theta2 - reference[1],
@@ -263,7 +284,7 @@ class RobotKinematics {
             clampToLimit(bestSolution.theta2, limits.theta2),
             clampToLimit(bestSolution.theta3, limits.theta3)
         ];
-        result.solutions = validSolutions;
+        result.solutions = reachableSolutions;
         result.configuration = bestSolution.config;
 
         return result;
@@ -323,8 +344,8 @@ class RobotKinematics {
 
         // Both elbow and end effector must be at or above floor level.
         // The links are straight segments, so the whole arm is then above it.
-        // (-1e-9: a joint exactly on the floor must not fail from rounding)
-        const minFloorZ = -1e-9;
+        // (-1e-6 mm: a joint exactly on the floor must not fail from rounding)
+        const minFloorZ = -1e-6;
 
         return {
             valid: elbowZ >= minFloorZ && endZ >= minFloorZ,
@@ -349,14 +370,16 @@ class RobotKinematics {
      * Shoulder angle above which the elbow is high enough that the forearm
      * cannot reach the floor, whatever the elbow angle is
      * (L1 + L2·sin(θ2) ≥ L3)
+     * @returns {number|null} Degrees, or null if no shoulder angle is that safe
      */
     getSafeShoulderAngle() {
         const limits = this.jointLimits.theta2;
         const s = (this.L3 - this.L1) / this.L2;
         if (s <= -1) return limits.min;
-        if (s >= 1) return limits.max;
+        if (s >= 1) return null;
         // 1° margin keeps the forearm clear of the floor plane
-        return Math.min(limits.max, Math.max(limits.min, this.radToDeg(Math.asin(s)) + 1));
+        const angle = this.radToDeg(Math.asin(s)) + 1;
+        return angle <= limits.max ? Math.max(limits.min, angle) : null;
     }
 
     /**
@@ -402,7 +425,8 @@ class RobotKinematics {
 
         if (this.isPathAboveFloor(direct)) return direct;
 
-        const candidates = [this.getSafeShoulderAngle(), this.jointLimits.theta2.max];
+        const candidates = [this.getSafeShoulderAngle(), this.jointLimits.theta2.max]
+            .filter(angle => angle !== null);
         for (const safe of candidates) {
             const lift = Math.max(start[1], target[1], safe);
             const path = [
@@ -415,7 +439,118 @@ class RobotKinematics {
             );
             if (this.isPathAboveFloor(path)) return path;
         }
-        return null;
+
+        // Unusual link lengths: search a route through the valid poses
+        return this.planGridPath(start, target);
+    }
+
+    /**
+     * Fallback planner: shortest route through a grid of valid (θ2, θ3) poses
+     *
+     * Heights don't depend on θ1, so the search runs in the (θ2, θ3) plane and the
+     * base turns proportionally along the way.
+     *
+     * @returns {Array|null} Waypoints [start, ..., target], or null if no route exists
+     */
+    planGridPath(start, target, gridStep = 5) {
+        const limits2 = this.jointLimits.theta2;
+        const limits3 = this.jointLimits.theta3;
+        const columns = Math.floor((limits2.max - limits2.min) / gridStep) + 1;
+        const rows = Math.floor((limits3.max - limits3.min) / gridStep) + 1;
+        const nodeCount = columns * rows;
+
+        const pose = node => [limits2.min + (node % columns) * gridStep, limits3.min + Math.floor(node / columns) * gridStep];
+        const isFree = p => this.isConfigurationAboveFloor([0, p[0], p[1]]).valid;
+        const segmentFree = (a, b) => this.isPathAboveFloor([[0, a[0], a[1]], [0, b[0], b[1]]], 0.5);
+        const distance = (a, b) => Math.hypot(a[0] - b[0], a[1] - b[1]);
+
+        const startPose = [start[1], start[2]];
+        const targetPose = [target[1], target[2]];
+
+        // Grid nodes the start/target connect to with a floor-free straight move
+        const attach = p => {
+            const i0 = Math.round((p[0] - limits2.min) / gridStep);
+            const j0 = Math.round((p[1] - limits3.min) / gridStep);
+            const nodes = [];
+            for (let i = i0 - 2; i <= i0 + 2; i++) {
+                for (let j = j0 - 2; j <= j0 + 2; j++) {
+                    if (i < 0 || j < 0 || i >= columns || j >= rows) continue;
+                    const node = j * columns + i;
+                    if (isFree(pose(node)) && segmentFree(p, pose(node))) nodes.push(node);
+                }
+            }
+            return nodes;
+        };
+
+        // Dijkstra from the start's attachment nodes (grid is small: a few thousand nodes)
+        const cost = new Float64Array(nodeCount).fill(Infinity);
+        const previous = new Int32Array(nodeCount).fill(-1);
+        const done = new Uint8Array(nodeCount);
+        attach(startPose).forEach(node => {
+            cost[node] = distance(startPose, pose(node));
+        });
+        const goals = new Map(attach(targetPose).map(node => [node, distance(pose(node), targetPose)]));
+        if (goals.size === 0) return null;
+
+        let best = -1;
+        let bestCost = Infinity;
+        for (;;) {
+            let current = -1;
+            for (let n = 0; n < nodeCount; n++) {
+                if (!done[n] && cost[n] < Infinity && (current === -1 || cost[n] < cost[current])) current = n;
+            }
+            if (current === -1 || cost[current] >= bestCost) break;
+            done[current] = 1;
+
+            if (goals.has(current) && cost[current] + goals.get(current) < bestCost) {
+                best = current;
+                bestCost = cost[current] + goals.get(current);
+            }
+
+            const ci = current % columns;
+            const cj = Math.floor(current / columns);
+            for (let di = -1; di <= 1; di++) {
+                for (let dj = -1; dj <= 1; dj++) {
+                    const i = ci + di;
+                    const j = cj + dj;
+                    if ((di === 0 && dj === 0) || i < 0 || j < 0 || i >= columns || j >= rows) continue;
+                    const next = j * columns + i;
+                    if (done[next] || !isFree(pose(next))) continue;
+                    const nextCost = cost[current] + distance(pose(current), pose(next));
+                    if (nextCost < cost[next] && segmentFree(pose(current), pose(next))) {
+                        cost[next] = nextCost;
+                        previous[next] = current;
+                    }
+                }
+            }
+        }
+        if (best === -1) return null;
+
+        // Route in the (θ2, θ3) plane, then drop waypoints that a straight move can skip
+        const route = [targetPose];
+        for (let node = best; node !== -1; node = previous[node]) route.push(pose(node));
+        route.push(startPose);
+        route.reverse();
+
+        const simplified = [route[0]];
+        for (let i = 0; i < route.length - 1;) {
+            let j = route.length - 1;
+            while (j > i + 1 && !segmentFree(route[i], route[j])) j--;
+            simplified.push(route[j]);
+            i = j;
+        }
+
+        // Turn the base in proportion to the distance covered
+        const lengths = [0];
+        for (let i = 1; i < simplified.length; i++) {
+            lengths.push(lengths[i - 1] + distance(simplified[i - 1], simplified[i]));
+        }
+        const total = lengths[lengths.length - 1] || 1;
+        const path = simplified.map((p, i) => [start[0] + (target[0] - start[0]) * lengths[i] / total, p[0], p[1]]);
+        path[0] = [...start];
+        path[path.length - 1] = [...target];
+
+        return this.isPathAboveFloor(path) ? path : null;
     }
 
     /**
@@ -431,10 +566,14 @@ class RobotKinematics {
      * @param {number} y - Target Y coordinate (kinematics frame)
      * @param {number} z - Target Z coordinate (kinematics frame)
      * @param {Object} [fromPoint] - A reachable {x, y, z} to fall back toward (e.g. the current tip)
+     * @param {Object} [options] - Passed to inverseKinematics: {reference, maxStep}
+     *   (a drag uses the current pose and a small maxStep, so "reachable" means
+     *   reachable without the arm jumping to another configuration)
      * @returns {Object} Clamped position {x, y, z, wasClamped}
      */
-    clampToWorkspace(x, y, z, fromPoint = null) {
-        const anchor = fromPoint && this.isPointReachable(fromPoint.x, fromPoint.y, fromPoint.z)
+    clampToWorkspace(x, y, z, fromPoint = null, options = {}) {
+        const reachable = p => this.isPointReachable(p.x, p.y, p.z, options);
+        const anchor = fromPoint && reachable(fromPoint)
             ? { x: fromPoint.x, y: fromPoint.y, z: fromPoint.z }
             : this.getAnchorPoint(x, y);
 
@@ -442,22 +581,23 @@ class RobotKinematics {
             return { ...anchor, wasClamped: true };
         }
 
-        if (this.isPointReachable(x, y, z)) {
+        if (reachable({ x, y, z })) {
             return { x, y, z, wasClamped: false };
         }
 
         let candidate = this.projectToReachShell(x, y, z, anchor);
-        if (!this.isPointReachable(candidate.x, candidate.y, candidate.z)) {
-            candidate = this.furthestReachablePoint(anchor, candidate);
+        if (!reachable(candidate)) {
+            candidate = this.furthestReachablePoint(anchor, candidate, options);
         }
         return { ...candidate, wasClamped: true };
     }
 
     /**
      * True if some valid configuration (joint limits, floor) puts the tip at (x, y, z)
+     * @param {Object} [options] - {reference, maxStep}, see inverseKinematics
      */
-    isPointReachable(x, y, z) {
-        return this.inverseKinematics(x, y, z).valid;
+    isPointReachable(x, y, z, { reference = this.currentAngles, maxStep = Infinity } = {}) {
+        return this.inverseKinematics(x, y, z, reference, { maxStep }).valid;
     }
 
     /**
@@ -469,13 +609,13 @@ class RobotKinematics {
         const minReach = this.getMinReach();
         const margin = 1e-6;
 
-        const r = Math.sqrt(x * x + y * y);
+        const r = Math.hypot(x, y);
         // Direction around the base; on the Z axis use the anchor's
         const azimuth = r > 1e-9 ? Math.atan2(y, x) : Math.atan2(anchor.y, anchor.x);
 
         let planarR = r;
         let zRel = Math.max(z, 0) - this.L1;
-        const D = Math.sqrt(planarR * planarR + zRel * zRel);
+        const D = Math.hypot(planarR, zRel);
 
         if (D > maxReach) {
             // Pull toward the shoulder; the shoulder is above the floor, so z stays ≥ 0
@@ -516,8 +656,9 @@ class RobotKinematics {
 
     /**
      * Furthest reachable point on the segment from `from` (reachable) toward `to`
+     * @param {Object} [options] - {reference, maxStep}, see inverseKinematics
      */
-    furthestReachablePoint(from, to) {
+    furthestReachablePoint(from, to, options = {}) {
         const at = t => ({
             x: from.x + (to.x - from.x) * t,
             y: from.y + (to.y - from.y) * t,
@@ -525,7 +666,7 @@ class RobotKinematics {
         });
         const reachable = t => {
             const p = at(t);
-            return this.isPointReachable(p.x, p.y, p.z);
+            return this.isPointReachable(p.x, p.y, p.z, options);
         };
 
         // Coarse scan from the target back toward the start...

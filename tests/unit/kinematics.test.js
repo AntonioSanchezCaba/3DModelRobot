@@ -183,3 +183,82 @@ test('clampToWorkspace always returns a point the arm can reach above the floor'
     }
     assert.deepEqual(failures, []);
 });
+
+test('maxStep keeps a dragged arm in its configuration instead of flipping', () => {
+    const k = new RobotKinematics();
+    // Elbow down with the elbow resting on the floor; the elbow-up branch reaches the
+    // same point only with a ~190° elbow flip
+    const reference = [0, -30, 95.32];
+    const tip = k.forwardKinematics(reference).position;
+
+    const free = k.inverseKinematics(tip.x, tip.y, tip.z - 1, reference);
+    const limited = k.inverseKinematics(tip.x, tip.y, tip.z - 1, reference, { maxStep: 20 });
+    assert.ok(free.valid, 'reachable when any configuration is allowed');
+    assert.ok(Math.abs(free.angles[2] - reference[2]) > 150, 'the free solution flips the elbow');
+    assert.equal(limited.valid, false, 'no small-step solution: the drag stops at the limit');
+});
+
+test('a simulated drag never jumps more than the step limit per move', () => {
+    const k = new RobotKinematics();
+    const rand = seededRandom(3);
+    let current = [0, 0, 0];
+    let point = [180, 0, 50];
+    for (let i = 0; i < 20000; i++) {
+        point = point.map(v => v + (rand() - 0.5) * 4);
+        if (Math.hypot(...point) > 400) point = point.map(v => v * 0.9);
+
+        const tip = k.forwardKinematics(current).position;
+        const options = { reference: current, maxStep: 20 };
+        const c = k.clampToWorkspace(point[0], point[1], point[2], tip, options);
+        const ik = k.inverseKinematics(c.x, c.y, c.z, current, options);
+        assert.ok(ik.valid);
+        assert.ok(k.isConfigurationValid(ik.angles));
+        assert.ok(ik.angles.every((a, j) => Math.abs(a - current[j]) <= 20 + 1e-9));
+        current = ik.angles;
+    }
+});
+
+test('IK prefers θ1 = -180° over +180° when the reference is near -180°', () => {
+    const k = new RobotKinematics();
+    const q = [-180, 10, 20];
+    const tip = k.forwardKinematics(q).position;
+    const ik = k.inverseKinematics(tip.x, tip.y, tip.z, q);
+    assert.ok(close(ik.angles[0], -180, 1e-6), `got θ1 = ${ik.angles[0]}`);
+});
+
+test('planner finds floor-safe routes for unusual link lengths', () => {
+    const lengthSets = [[100, 100, 100], [150, 100, 150], [174, 163, 156], [10, 40, 150]];
+    for (const lengths of lengthSets) {
+        const k = new RobotKinematics();
+        k.updateLinkLengths(...lengths);
+        const rand = seededRandom(lengths[0]);
+        for (let i = 0; i < 300; i++) {
+            const start = randomValidConfig(k, rand);
+            const target = randomValidConfig(k, rand);
+            const path = k.planJointPath(start, target);
+            assert.ok(path, `no path for ${lengths}: ${start} -> ${target}`);
+            assert.ok(k.isPathAboveFloor(path, 0.25));
+            assert.deepEqual(path[path.length - 1], target);
+        }
+    }
+
+    const k = new RobotKinematics();
+    k.updateLinkLengths(100, 100, 100);
+    assert.ok(k.planJointPath([0, -80, -110], [0, 0, 0]), 'Home from a folded pose');
+});
+
+test('updateLinkLengths rejects non-positive and non-numeric lengths', () => {
+    const k = new RobotKinematics();
+    for (const bad of [[0, 100, 80], [50, -1, 80], [50, 100, NaN], [50, 100, '80']]) {
+        assert.throws(() => k.updateLinkLengths(...bad));
+    }
+    assert.deepEqual([k.L1, k.L2, k.L3], [50, 100, 80]);
+});
+
+test('huge but finite coordinates do not produce NaN', () => {
+    const k = new RobotKinematics();
+    const tip = k.forwardKinematics([0, 0, 0]).position;
+    const c = k.clampToWorkspace(1e155, 0, 0, tip);
+    assert.ok([c.x, c.y, c.z].every(Number.isFinite));
+    assert.ok(k.isPointReachable(c.x, c.y, c.z));
+});
