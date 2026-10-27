@@ -913,7 +913,9 @@ class UIController {
         backdrop.addEventListener('mousedown', (e) => {
             if (e.target === backdrop) this.closeDialog(false);
         });
-        backdrop.addEventListener('keydown', (e) => {
+        // Document level: works even if focus left the dialog (e.g. a click on its padding)
+        document.addEventListener('keydown', (e) => {
+            if (!this.dialog) return;
             if (e.key === 'Escape') {
                 e.preventDefault();
                 this.closeDialog(false);
@@ -1026,7 +1028,11 @@ class UIController {
 
         const first = focusable[0];
         const last = focusable[focusable.length - 1];
-        if (e.shiftKey && document.activeElement === first) {
+        if (!focusable.includes(document.activeElement)) {
+            // Focus is outside the dialog: bring it back in
+            e.preventDefault();
+            (e.shiftKey ? last : first).focus();
+        } else if (e.shiftKey && document.activeElement === first) {
             e.preventDefault();
             last.focus();
         } else if (!e.shiftKey && document.activeElement === last) {

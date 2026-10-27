@@ -1,6 +1,6 @@
 {
   "name": "roboarm-3d",
-  "version": "1.1.0",
+  "version": "1.1.1",
   "private": true,
   "description": "Visualizacion y control 3D de un brazo robotico de 3 DOF con motores NEMA 17",
   "scripts": {
